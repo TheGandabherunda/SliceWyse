@@ -7,7 +7,11 @@ export default defineConfig({
   plugins: [
     react(),
     nodePolyfills({
-      // Whether to polyfill `node:` protocol imports.
+      globals: {
+        Buffer: true,
+        global: true,
+        process: true,
+      },
       protocolImports: true,
     }),
   ],

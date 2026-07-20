@@ -1,29 +1,37 @@
 import { createHelia } from 'helia';
 import { createOrbitDB } from '@orbitdb/core';
+import type { Helia } from 'helia';
 
-let heliaInstance: any = null;
+let heliaInstance: Helia | null = null;
 let orbitdbInstance: any = null;
+let initPromise: Promise<any> | null = null;
 
 export const initDB = async () => {
   if (orbitdbInstance) return orbitdbInstance;
+  if (initPromise) return initPromise;
 
-  try {
-    console.log('Initializing Helia (IPFS)...');
-    heliaInstance = await createHelia();
-    console.log('Helia initialized.');
+  initPromise = (async () => {
+    try {
+      console.log('Initializing Helia (IPFS)...');
+      heliaInstance = await createHelia();
+      console.log('Helia initialized.');
 
-    console.log('Initializing OrbitDB...');
-    orbitdbInstance = await createOrbitDB({
-      ipfs: heliaInstance,
-      directory: './slicewyse-orbitdb',
-    });
-    console.log('OrbitDB initialized.', orbitdbInstance.identity.id);
+      console.log('Initializing OrbitDB...');
+      orbitdbInstance = await createOrbitDB({
+        ipfs: heliaInstance,
+        directory: './slicewyse-orbitdb',
+      });
+      console.log('OrbitDB initialized.', orbitdbInstance.identity.id);
 
-    return orbitdbInstance;
-  } catch (error) {
-    console.error('Failed to initialize OrbitDB:', error);
-    throw error;
-  }
+      return orbitdbInstance;
+    } catch (error) {
+      console.error('Failed to initialize OrbitDB:', error);
+      initPromise = null;
+      throw error;
+    }
+  })();
+
+  return initPromise;
 };
 
 export const getOrbitDB = () => orbitdbInstance;
