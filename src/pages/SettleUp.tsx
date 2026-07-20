@@ -2,9 +2,14 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { X, ArrowRight } from 'lucide-react';
 import { Avatar } from '../components/Avatar';
+import { useAppContext } from '../AppContext';
+import { CURRENCIES } from '../services/group';
 
 export const SettleUp: React.FC = () => {
   const navigate = useNavigate();
+  const { joinedGroups } = useAppContext();
+  
+  const [selectedGroup, setSelectedGroup] = useState(joinedGroups[0]?.address || '');
   const [amount, setAmount] = useState('');
   
   // Dummy data for now
@@ -14,9 +19,12 @@ export const SettleUp: React.FC = () => {
   const handleSettle = (e: React.FormEvent) => {
     e.preventDefault();
     if (!amount) return;
-    console.log(`Settling ${amount} from ${fromUser} to ${toUser}`);
+    console.log(`Settling ${amount} from ${fromUser} to ${toUser} in ${selectedGroup}`);
     navigate(-1);
   };
+
+  const group = joinedGroups.find(g => g.address === selectedGroup);
+  const currencySymbol = CURRENCIES.find(c => c.code === group?.currency)?.symbol || '$';
 
   return (
     <div className="animate-slide-up" style={{ paddingBottom: '2rem' }}>
@@ -46,9 +54,24 @@ export const SettleUp: React.FC = () => {
 
         <form onSubmit={handleSettle} style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
           <div>
+            <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-secondary)' }}>Group</label>
+            <select 
+              value={selectedGroup} 
+              onChange={e => setSelectedGroup(e.target.value)} 
+              style={{ width: '100%' }}
+              required
+            >
+              <option value="" disabled>Select a group</option>
+              {joinedGroups.map(g => (
+                <option key={g.address} value={g.address}>{g.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
             <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-secondary)', textAlign: 'center' }}>Amount</label>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(255,255,255,0.05)', borderRadius: 'var(--border-radius-md)', padding: '0 1rem', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
-              <span style={{ fontSize: '2rem', color: 'var(--accent-positive)', marginRight: '0.5rem' }}>$</span>
+              <span style={{ fontSize: '2rem', color: 'var(--accent-positive)', marginRight: '0.5rem' }}>{currencySymbol}</span>
               <input 
                 type="number" 
                 step="0.01"

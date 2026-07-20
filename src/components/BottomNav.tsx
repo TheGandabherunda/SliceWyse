@@ -1,14 +1,12 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { Home, Users, List, Activity } from 'lucide-react';
+import { Home, List } from 'lucide-react';
 import clsx from 'clsx';
 import './BottomNav.css';
 
 const navItems = [
   { name: 'Dashboard', path: '/', icon: Home },
-  { name: 'Friends', path: '/friends', icon: Users },
   { name: 'Groups', path: '/groups', icon: List },
-  { name: 'Activity', path: '/activity', icon: Activity },
 ];
 
 export const BottomNav: React.FC = () => {

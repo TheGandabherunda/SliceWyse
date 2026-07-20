@@ -1,9 +1,14 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { X } from 'lucide-react';
+import { useAppContext } from '../AppContext';
+import { CURRENCIES } from '../services/group';
 
 export const AddExpense: React.FC = () => {
   const navigate = useNavigate();
+  const { joinedGroups } = useAppContext();
+  
+  const [selectedGroup, setSelectedGroup] = useState(joinedGroups[0]?.address || '');
   const [description, setDescription] = useState('');
   const [amount, setAmount] = useState('');
   const [splitMethod, setSplitMethod] = useState<'EQUAL' | 'EXACT' | 'PERCENTAGE'>('EQUAL');
@@ -17,6 +22,9 @@ export const AddExpense: React.FC = () => {
     navigate(-1);
   };
 
+  const group = joinedGroups.find(g => g.address === selectedGroup);
+  const currencySymbol = CURRENCIES.find(c => c.code === group?.currency)?.symbol || '$';
+
   return (
     <div className="animate-slide-up" style={{ paddingBottom: '2rem' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
@@ -28,6 +36,22 @@ export const AddExpense: React.FC = () => {
 
       <div className="glass-card">
         <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+          
+          <div>
+            <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-secondary)' }}>Group</label>
+            <select 
+              value={selectedGroup} 
+              onChange={e => setSelectedGroup(e.target.value)} 
+              style={{ width: '100%' }}
+              required
+            >
+              <option value="" disabled>Select a group</option>
+              {joinedGroups.map(g => (
+                <option key={g.address} value={g.address}>{g.name}</option>
+              ))}
+            </select>
+          </div>
+
           <div>
             <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-secondary)' }}>Description</label>
             <input 
@@ -43,7 +67,7 @@ export const AddExpense: React.FC = () => {
           <div>
             <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-secondary)' }}>Amount</label>
             <div style={{ display: 'flex', alignItems: 'center', background: 'rgba(255,255,255,0.05)', borderRadius: 'var(--border-radius-md)', padding: '0 1rem', border: '1px solid rgba(255,255,255,0.1)' }}>
-              <span style={{ fontSize: '1.25rem', color: 'var(--text-secondary)', marginRight: '0.5rem' }}>$</span>
+              <span style={{ fontSize: '1.25rem', color: 'var(--text-secondary)', marginRight: '0.5rem' }}>{currencySymbol}</span>
               <input 
                 type="number" 
                 step="0.01"

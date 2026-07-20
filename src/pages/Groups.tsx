@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { CURRENCIES } from '../services/group';
+import { useAppContext } from '../AppContext';
 
 export const Groups: React.FC = () => {
+  const { addGroup, joinedGroups } = useAppContext();
   const [isCreating, setIsCreating] = useState(false);
   const [groupName, setGroupName] = useState('');
   const [currency, setCurrency] = useState('USD');
@@ -10,10 +12,14 @@ export const Groups: React.FC = () => {
     e.preventDefault();
     if (!groupName) return;
     
-    console.log('Creating group:', groupName, currency);
-    // TODO: Wire up GroupService and navigation to the new group
-    setIsCreating(false);
-    setGroupName('');
+    try {
+      await addGroup(groupName, currency);
+      setIsCreating(false);
+      setGroupName('');
+    } catch (err) {
+      console.error('Failed to create group', err);
+      alert('Failed to create group');
+    }
   };
 
   return (
@@ -58,9 +64,20 @@ export const Groups: React.FC = () => {
         </div>
       )}
 
-      <div className="glass-card">
-        <p className="text-secondary text-center">You are not part of any groups yet.</p>
-      </div>
+      {joinedGroups.length === 0 ? (
+        <div className="glass-card">
+          <p className="text-secondary text-center">You are not part of any groups yet.</p>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          {joinedGroups.map((g, i) => (
+            <div key={i} className="glass-card" style={{ padding: '1rem' }}>
+              <h3>{g.name}</h3>
+              <p className="text-secondary text-sm">Currency: {g.currency}</p>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
