@@ -1,5 +1,5 @@
 import { getOrbitDB, getLocalUser } from './db';
-import { encryptData, decryptData, importKeyFromURLSafeBase64 } from './encryption';
+import { encryptData, decryptData } from './encryption';
 
 export interface GroupConfig {
   name: string;

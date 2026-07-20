@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeBalances, simplifyDebts, Expense } from './debt';
+import { computeBalances, simplifyDebts, type Expense } from './debt';
 
 describe('Debt Simplification Engine', () => {
   it('should perfectly split an equal expense', () => {

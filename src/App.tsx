@@ -1,12 +1,11 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { HashRouter as Router, Routes, Route, Link } from 'react-router-dom';
 import { BottomNav } from './components/BottomNav';
 import { FAB } from './components/FAB';
 
 import { Groups } from './pages/Groups';
 import { AddExpense } from './pages/AddExpense';
 import { SettleUp } from './pages/SettleUp';
-import { Link } from 'react-router-dom';
 
 // Placeholder Pages
 const Dashboard = () => (
@@ -29,7 +28,7 @@ const Activity = () => <div className="animate-slide-up"><h2>Activity</h2></div>
 
 const App: React.FC = () => {
   return (
-    <BrowserRouter>
+    <Router>
       <div className="app-container">
         <header style={{ marginBottom: '2rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <h1 style={{ color: 'var(--brand-primary)' }}>SliceWyse</h1>
@@ -49,7 +48,7 @@ const App: React.FC = () => {
         <FAB />
         <BottomNav />
       </div>
-    </BrowserRouter>
+    </Router>
   );
 };
 
