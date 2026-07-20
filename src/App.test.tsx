@@ -2,7 +2,7 @@ import './setupTests';
 import { render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import App from './App';
-import * as dbService from './services/db';
+
 
 // Mock the DB service
 vi.mock('./services/db', () => ({

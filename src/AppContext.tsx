@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { initDB } from './services/db';
+import { initDB, getLocalUser } from './services/db';
 import { generateEncryptionKey, exportKeyToURLSafeBase64, importKeyFromURLSafeBase64 } from './services/encryption';
 import { GroupService } from './services/group';
 
@@ -8,9 +8,11 @@ export interface JoinedGroup {
   name: string;
   currency: string;
   keyBase64: string;
+  expenses?: any[];
 }
 
 interface AppState {
+  localUser: any;
   isInitialized: boolean;
   cryptoKey: CryptoKey | null;
   joinedGroups: JoinedGroup[];
@@ -26,6 +28,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [cryptoKey, setCryptoKey] = useState<CryptoKey | null>(null);
   const [joinedGroups, setJoinedGroups] = useState<JoinedGroup[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const localUser = getLocalUser();
 
   useEffect(() => {
     const initialize = async () => {
@@ -104,7 +107,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   return (
-    <AppContext.Provider value={{ isInitialized, cryptoKey, joinedGroups, addGroup, joinGroup, error }}>
+    <AppContext.Provider value={{ localUser, isInitialized, cryptoKey, joinedGroups, addGroup, joinGroup, error }}>
       {children}
     </AppContext.Provider>
   );
