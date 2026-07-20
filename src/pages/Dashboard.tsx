@@ -4,7 +4,7 @@ import { useAppContext } from '../AppContext';
 import { CURRENCIES } from '../services/group';
 
 export const Dashboard: React.FC = () => {
-  const { joinedGroups, cryptoKey } = useAppContext();
+  const { joinedGroups, cryptoKey, localUser } = useAppContext();
   const [balancesByCurrency, setBalancesByCurrency] = useState<Record<string, number>>({});
   const [isLoading, setIsLoading] = useState(true);
 
@@ -12,14 +12,23 @@ export const Dashboard: React.FC = () => {
     const calculateBalances = async () => {
       if (!cryptoKey) return;
       setIsLoading(true);
-      // For now we'll mock the extraction to avoid massive loads on UI thread
-      // We will actually load them to prove it works in the future
+      // In a real app we'd query OrbitDB per group. For this prototype/test, 
+      // we assume the group object has an 'expenses' array loaded, or we default to 0.
       const balances: Record<string, number> = {};
       if (joinedGroups.length > 0) {
         for (const group of joinedGroups) {
           if (!balances[group.currency]) balances[group.currency] = 0;
-          // Placeholder computed balance
-          balances[group.currency] += 0;
+          
+          let groupBalance = 0;
+          if (group.expenses) {
+            for (const expense of group.expenses) {
+              const myId = localUser?.id || 'unknown';
+              const iPaid = expense.paidBy === myId ? expense.amount : 0;
+              const iOwe = expense.splits?.[myId] || 0;
+              groupBalance += (iPaid - iOwe);
+            }
+          }
+          balances[group.currency] += groupBalance;
         }
       } else {
         balances['USD'] = 0;

@@ -13,8 +13,61 @@ export const initDB = async () => {
   initPromise = (async () => {
     try {
       console.log('Initializing Helia (IPFS)...');
-      heliaInstance = await createHelia();
-      console.log('Helia initialized.');
+      
+      const { createLibp2p } = await import('libp2p');
+      const { identify } = await import('@libp2p/identify');
+      const { gossipsub } = await import('@chainsafe/libp2p-gossipsub');
+      const { webSockets } = await import('@libp2p/websockets');
+      const { webRTC } = await import('@libp2p/webrtc');
+      const { noise } = await import('@chainsafe/libp2p-noise');
+      const { yamux } = await import('@chainsafe/libp2p-yamux');
+      const { bootstrap } = await import('@libp2p/bootstrap');
+      
+      const libp2p = await createLibp2p({
+        addresses: {
+          listen: [
+            '/webrtc'
+          ]
+        },
+        transports: [
+          webSockets(),
+          webRTC()
+        ],
+        connectionEncrypters: [noise()],
+        streamMuxers: [yamux()],
+        peerDiscovery: [
+          bootstrap({
+            list: [
+              '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
+              '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb',
+              '/dnsaddr/bootstrap.libp2p.io/p2p/Za1XcbhzgMwVKp82p8cubm5T5iG43Qz1CquWbe2oA2Nb'
+            ]
+          })
+        ],
+        services: {
+          identify: identify(),
+          pubsub: gossipsub({ allowPublishToZeroTopicPeers: true }) as any
+        }
+      });
+
+      const { IDBBlockstore } = await import('blockstore-idb');
+      const { IDBDatastore } = await import('datastore-idb');
+      
+      const blockstore = new IDBBlockstore('helia-blocks');
+      const datastore = new IDBDatastore('helia-data');
+      await blockstore.open();
+      await datastore.open();
+
+      const { withLibp2p } = await import('@helia/libp2p');
+      
+      const baseHelia = createHelia({ 
+        blockstore,
+        datastore
+      });
+      
+      heliaInstance = await withLibp2p(baseHelia, libp2p);
+      await heliaInstance.start();
+      console.log('Helia initialized with GossipSub.');
 
       console.log('Initializing OrbitDB...');
       orbitdbInstance = await createOrbitDB({
