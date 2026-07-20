@@ -39,8 +39,7 @@ export const initDB = async () => {
           bootstrap({
             list: [
               '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
-              '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb',
-              '/dnsaddr/bootstrap.libp2p.io/p2p/Za1XcbhzgMwVKp82p8cubm5T5iG43Qz1CquWbe2oA2Nb'
+              '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb'
             ]
           })
         ],
