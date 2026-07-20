@@ -1,4 +1,4 @@
-import { createHelia } from 'helia';
+import { createHeliaLight } from 'helia';
 import { createOrbitDB } from '@orbitdb/core';
 import type { Helia } from 'helia';
 
@@ -22,6 +22,7 @@ export const initDB = async () => {
       const { noise } = await import('@chainsafe/libp2p-noise');
       const { yamux } = await import('@chainsafe/libp2p-yamux');
       const { bootstrap } = await import('@libp2p/bootstrap');
+      const { circuitRelayTransport } = await import('@libp2p/circuit-relay-v2');
       
       const libp2p = await createLibp2p({
         addresses: {
@@ -31,7 +32,8 @@ export const initDB = async () => {
         },
         transports: [
           webSockets(),
-          webRTC()
+          webRTC(),
+          circuitRelayTransport({ discoverRelays: 1 } as any)
         ],
         connectionEncrypters: [noise()],
         streamMuxers: [yamux()],
@@ -58,10 +60,16 @@ export const initDB = async () => {
       await datastore.open();
 
       const { withLibp2p } = await import('@helia/libp2p');
-      
-      const baseHelia = createHelia({ 
+      const dagCbor = await import('@ipld/dag-cbor');
+      const dagJson = await import('@ipld/dag-json');
+      const json = await import('multiformats/codecs/json');
+      const { sha512 } = await import('multiformats/hashes/sha2');
+
+      const baseHelia = createHeliaLight({ 
         blockstore,
-        datastore
+        datastore,
+        codecs: [dagCbor, dagJson, json],
+        hashers: [sha512]
       });
       
       heliaInstance = await withLibp2p(baseHelia, libp2p);
