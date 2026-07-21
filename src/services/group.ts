@@ -1,3 +1,4 @@
+import { IPFSAccessController } from '@orbitdb/core';
 import { getOrbitDB, getLocalUser } from './db';
 import { encryptData, decryptData } from './encryption';
 
@@ -32,7 +33,7 @@ export class GroupService {
     const dbName = `slicewyse-group-${crypto.randomUUID()}`;
     const db = await orbitdb.open(dbName, {
       type: 'events',
-      AccessController: orbitdb.accessControllers.get('ipfs')() // Public read, write by anyone with the address (encryption protects it)
+      AccessController: IPFSAccessController({ write: ['*'] }) // Public read, write by anyone with the address (encryption protects it)
     });
 
     const service = new GroupService(db, cryptoKey);
