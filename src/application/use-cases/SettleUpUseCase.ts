@@ -2,6 +2,7 @@ import { Settlement } from '../../domain/entities/Settlement';
 import { Money } from '../../domain/value-objects/Money';
 import { identityService } from '../../infrastructure/identity/IdentityService';
 import { DexieSettlementRepository } from '../../infrastructure/repositories/DexieSettlementRepository';
+import { DexieGroupRepository } from '../../infrastructure/repositories/DexieGroupRepository';
 import { syncCoordinator } from '../services/SyncCoordinator';
 
 export interface SettleUpInput {
@@ -13,12 +14,20 @@ export interface SettleUpInput {
 }
 
 export class SettleUpUseCase {
-  constructor(private settlementRepo = new DexieSettlementRepository()) {}
+  constructor(
+    private settlementRepo = new DexieSettlementRepository(),
+    private groupRepo = new DexieGroupRepository()
+  ) {}
 
   async execute(input: SettleUpInput): Promise<Settlement> {
     const currentIdentity = await identityService.getCurrentIdentity();
     if (!currentIdentity) {
       throw new Error('User identity required to record settlement');
+    }
+
+    const group = await this.groupRepo.getGroupById(input.groupId);
+    if (!group) {
+      throw new Error(`Group with ID "${input.groupId}" not found`);
     }
 
     const settlement = new Settlement({
@@ -51,7 +60,7 @@ export class SettleUpUseCase {
       settlement.groupId,
       30080,
       JSON.stringify(settlementPayload),
-      [settlement.payer, settlement.payee]
+      group.members.map((member) => member.pubkey.value)
     );
 
     return settlement;

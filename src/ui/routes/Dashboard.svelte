@@ -35,7 +35,11 @@
   }
 
   $effect(() => {
-    loadData();
+    void loadData();
+    return identityService.onIdentityChange((identity) => {
+      currentIdentity = identity;
+      void loadData();
+    });
   });
 </script>
 

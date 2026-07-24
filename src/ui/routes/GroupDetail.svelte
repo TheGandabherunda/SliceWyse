@@ -68,7 +68,10 @@
   }
 
   $effect(() => {
-    loadData();
+    void loadData();
+    return identityService.onIdentityChange(() => {
+      void loadData();
+    });
   });
 
   function getMemberName(pubkeyHex: string): string {

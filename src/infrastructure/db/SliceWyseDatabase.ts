@@ -4,6 +4,8 @@ export interface IdentityRecord {
   pubkey: string; // 64-char hex
   secretKey?: string; // Hex secret key if locally generated/imported
   displayName: string;
+  /** True when the name was explicitly chosen in SliceWyse rather than inferred from Nostr metadata. */
+  hasCustomDisplayName?: boolean;
   isExtension: boolean; // true if NIP-07 extension
   isCurrent: number; // 1 for true, 0 for false (IndexedDB key constraint)
   createdAt: number;

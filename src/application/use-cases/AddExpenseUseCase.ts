@@ -2,6 +2,7 @@ import { Expense, type SplitType } from '../../domain/entities/Expense';
 import { Money } from '../../domain/value-objects/Money';
 import { identityService } from '../../infrastructure/identity/IdentityService';
 import { DexieExpenseRepository } from '../../infrastructure/repositories/DexieExpenseRepository';
+import { DexieGroupRepository } from '../../infrastructure/repositories/DexieGroupRepository';
 import { syncCoordinator } from '../services/SyncCoordinator';
 
 export interface AddExpenseInput {
@@ -16,12 +17,20 @@ export interface AddExpenseInput {
 }
 
 export class AddExpenseUseCase {
-  constructor(private expenseRepo = new DexieExpenseRepository()) {}
+  constructor(
+    private expenseRepo = new DexieExpenseRepository(),
+    private groupRepo = new DexieGroupRepository()
+  ) {}
 
   async execute(input: AddExpenseInput): Promise<Expense> {
     const currentIdentity = await identityService.getCurrentIdentity();
     if (!currentIdentity) {
       throw new Error('User identity required to create expense');
+    }
+
+    const group = await this.groupRepo.getGroupById(input.groupId);
+    if (!group) {
+      throw new Error(`Group with ID "${input.groupId}" not found`);
     }
 
     const totalMoney = new Money(input.amountCents, input.currency);
@@ -80,7 +89,7 @@ export class AddExpenseUseCase {
       expense.groupId,
       30079,
       JSON.stringify(expensePayload),
-      input.participantPubkeys
+      group.members.map((member) => member.pubkey.value)
     );
 
     return expense;

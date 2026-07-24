@@ -7,6 +7,10 @@ import { relayManager } from '../nostr/RelayManager';
 export interface NostrWindowExtension {
   getPublicKey(): Promise<string>;
   signEvent(event: Record<string, unknown>): Promise<Record<string, unknown>>;
+  nip44?: {
+    encrypt(pubkey: string, plaintext: string): Promise<string>;
+    decrypt(pubkey: string, ciphertext: string): Promise<string>;
+  };
 }
 
 declare global {
@@ -16,6 +20,8 @@ declare global {
 }
 
 export class IdentityService {
+  private identityListeners = new Set<(identity: IdentityRecord) => void>();
+
   /**
    * Generates a new Nostr keypair locally, stores it in IndexedDB, and sets it as the active identity.
    */
@@ -35,6 +41,7 @@ export class IdentityService {
       pubkey: pubkeyHex,
       secretKey: secretKeyHex,
       displayName: displayName.trim(),
+      hasCustomDisplayName: true,
       isExtension: false,
       isCurrent: 1,
       createdAt: Date.now(),
@@ -74,6 +81,7 @@ export class IdentityService {
       pubkey: pubkeyHex,
       secretKey: secretKeyHex,
       displayName: fallbackName,
+      hasCustomDisplayName: Boolean(displayName.trim()),
       isExtension: false,
       isCurrent: 1,
       createdAt: Date.now(),
@@ -83,11 +91,7 @@ export class IdentityService {
 
     // Background fetch Nostr Kind 0 profile metadata from relays if no custom name specified
     if (!displayName.trim()) {
-      this.fetchProfileMetadata(pubkeyHex).then((profileName) => {
-        if (profileName) {
-          this.updateDisplayName(profileName);
-        }
-      });
+      void this.refreshProfileDisplayName(pubkeyHex);
     }
 
     return identity;
@@ -113,6 +117,7 @@ export class IdentityService {
     const identity: IdentityRecord = {
       pubkey: pubkeyHex,
       displayName: fallbackName,
+      hasCustomDisplayName: Boolean(displayName.trim()),
       isExtension: true,
       isCurrent: 1,
       createdAt: Date.now(),
@@ -121,11 +126,7 @@ export class IdentityService {
     await db.identities.put(identity);
 
     if (!displayName.trim()) {
-      this.fetchProfileMetadata(pubkeyHex).then((profileName) => {
-        if (profileName) {
-          this.updateDisplayName(profileName);
-        }
-      });
+      void this.refreshProfileDisplayName(pubkeyHex);
     }
 
     return identity;
@@ -209,14 +210,28 @@ export class IdentityService {
    */
   async getCurrentIdentity(): Promise<IdentityRecord | undefined> {
     const current = await db.identities.where({ isCurrent: 1 }).first();
-    if (current && this.isGenericName(current.displayName)) {
-      this.fetchProfileMetadata(current.pubkey).then((profileName) => {
-        if (profileName) {
-          this.updateDisplayName(profileName);
-        }
-      });
+    if (current && !this.hasCustomDisplayName(current) && this.isGenericName(current.displayName)) {
+      void this.refreshProfileDisplayName(current.pubkey);
     }
     return current;
+  }
+
+  /**
+   * Refreshes a fallback name from Kind 0 metadata without ever replacing a user-supplied name.
+   */
+  private async refreshProfileDisplayName(pubkey: string): Promise<void> {
+    const profileName = await this.fetchProfileMetadata(pubkey);
+    if (!profileName) return;
+
+    const identity = await db.identities.get(pubkey);
+    if (!identity || this.hasCustomDisplayName(identity)) return;
+
+    await this.setDisplayNameForPubkey(pubkey, profileName, false);
+  }
+
+  private hasCustomDisplayName(identity: IdentityRecord): boolean {
+    // Older records did not track this flag. Preserve any non-fallback name they already contain.
+    return identity.hasCustomDisplayName ?? !this.isGenericName(identity.displayName);
   }
 
   private isGenericName(name?: string): boolean {
@@ -239,17 +254,39 @@ export class IdentityService {
       throw new Error('Display name cannot be empty');
     }
 
-    const current = await this.getCurrentIdentity();
+    const current = await db.identities.where({ isCurrent: 1 }).first();
     if (!current) return;
 
-    await db.identities.update(current.pubkey, { displayName: trimmed });
+    await this.setDisplayNameForPubkey(current.pubkey, trimmed, true);
+  }
+
+  /** Lets the UI refresh when an asynchronous Kind 0 lookup changes the active identity. */
+  onIdentityChange(listener: (identity: IdentityRecord) => void): () => void {
+    this.identityListeners.add(listener);
+    return () => this.identityListeners.delete(listener);
+  }
+
+  private async setDisplayNameForPubkey(
+    pubkey: string,
+    displayName: string,
+    hasCustomDisplayName: boolean
+  ): Promise<void> {
+    const identity = await db.identities.get(pubkey);
+    if (!identity) return;
+
+    await db.identities.update(pubkey, { displayName, hasCustomDisplayName });
 
     // Self-heal & update all member records across all groups in IndexedDB
     const allMembers = await db.members.toArray();
     for (const member of allMembers) {
-      if (member.id !== undefined && member.pubkey.toLowerCase() === current.pubkey.toLowerCase()) {
-        await db.members.update(member.id, { displayName: trimmed });
+      if (member.id !== undefined && member.pubkey.toLowerCase() === pubkey.toLowerCase()) {
+        await db.members.update(member.id, { displayName });
       }
+    }
+
+    const updated = await db.identities.get(pubkey);
+    if (updated?.isCurrent) {
+      for (const listener of this.identityListeners) listener(updated);
     }
   }
 
