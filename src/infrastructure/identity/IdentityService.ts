@@ -1,4 +1,4 @@
-import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
+import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools/pure';
 import { bytesToHex, hexToBytes } from 'nostr-tools/utils';
 import * as nip19 from 'nostr-tools/nip19';
 import { db, type IdentityRecord } from '../db/SliceWyseDatabase';
@@ -142,7 +142,7 @@ export class IdentityService {
           resolved = true;
           resolve(null);
         }
-      }, 3000);
+      }, 8000);
 
       try {
         const unsubscribe = relayManager.subscribe(
@@ -167,6 +167,37 @@ export class IdentityService {
         resolve(null);
       }
     });
+  }
+
+  /**
+   * Signs a Nostr event using local secretKey or NIP-07 extension.
+   */
+  async signEvent(eventTemplate: {
+    kind: number;
+    created_at: number;
+    tags: string[][];
+    content: string;
+  }): Promise<any> {
+    const current = await this.getCurrentIdentity();
+    if (!current) {
+      throw new Error('No active identity available to sign event');
+    }
+
+    if (current.secretKey) {
+      const secretKeyBytes = hexToBytes(current.secretKey);
+      return finalizeEvent(eventTemplate, secretKeyBytes);
+    } else if (current.isExtension && typeof window !== 'undefined' && window.nostr) {
+      const eventToSign = {
+        pubkey: current.pubkey,
+        created_at: eventTemplate.created_at,
+        kind: eventTemplate.kind,
+        tags: eventTemplate.tags,
+        content: eventTemplate.content,
+      };
+      return await window.nostr.signEvent(eventToSign);
+    } else {
+      throw new Error('Signing failed: no secret key or extension available');
+    }
   }
 
   /**

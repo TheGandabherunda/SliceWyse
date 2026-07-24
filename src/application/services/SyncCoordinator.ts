@@ -49,12 +49,10 @@ export class SyncCoordinator {
       const pendingItems = await db.sync_queue.toArray();
       const currentIdentity = await identityService.getCurrentIdentity();
 
-      if (!currentIdentity || !currentIdentity.secretKey) {
+      if (!currentIdentity) {
         this.isProcessingQueue = false;
         return;
       }
-
-      const secretKeyBytes = hexToBytes(currentIdentity.secretKey);
 
       for (const item of pendingItems) {
         try {
@@ -67,15 +65,12 @@ export class SyncCoordinator {
             tags.push(['p', recipient]);
           }
 
-          const nostrEvent = finalizeEvent(
-            {
-              kind: item.eventKind,
-              created_at: Math.floor(Date.now() / 1000),
-              tags,
-              content: item.payloadJson,
-            },
-            secretKeyBytes
-          );
+          const nostrEvent = await identityService.signEvent({
+            kind: item.eventKind,
+            created_at: Math.floor(Date.now() / 1000),
+            tags,
+            content: item.payloadJson,
+          });
 
           const publishedRelays = await relayManager.publishEvent(nostrEvent);
           if (publishedRelays.length > 0 && item.id !== undefined) {
