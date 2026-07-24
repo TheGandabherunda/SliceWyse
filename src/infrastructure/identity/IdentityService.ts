@@ -2,6 +2,7 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { bytesToHex, hexToBytes } from 'nostr-tools/utils';
 import * as nip19 from 'nostr-tools/nip19';
 import { db, type IdentityRecord } from '../db/SliceWyseDatabase';
+import { relayManager } from '../nostr/RelayManager';
 
 export interface NostrWindowExtension {
   getPublicKey(): Promise<string>;
@@ -67,23 +68,35 @@ export class IdentityService {
 
     await db.identities.where({ isCurrent: 1 }).modify({ isCurrent: 0 });
 
+    const fallbackName = displayName.trim() || `${nip19.npubEncode(pubkeyHex).slice(0, 10)}...`;
+
     const identity: IdentityRecord = {
       pubkey: pubkeyHex,
       secretKey: secretKeyHex,
-      displayName: displayName.trim() || 'Nostr User',
+      displayName: fallbackName,
       isExtension: false,
       isCurrent: 1,
       createdAt: Date.now(),
     };
 
     await db.identities.put(identity);
+
+    // Background fetch Nostr Kind 0 profile metadata from relays if no custom name specified
+    if (!displayName.trim()) {
+      this.fetchProfileMetadata(pubkeyHex).then((profileName) => {
+        if (profileName) {
+          this.updateDisplayName(profileName);
+        }
+      });
+    }
+
     return identity;
   }
 
   /**
    * Connects to NIP-07 browser extension (e.g. Alby, nos2x).
    */
-  async connectExtension(displayName: string = 'Nostr Extension User'): Promise<IdentityRecord> {
+  async connectExtension(displayName: string = ''): Promise<IdentityRecord> {
     if (typeof window === 'undefined' || !window.nostr) {
       throw new Error('NIP-07 extension not detected in browser');
     }
@@ -95,16 +108,65 @@ export class IdentityService {
 
     await db.identities.where({ isCurrent: 1 }).modify({ isCurrent: 0 });
 
+    const fallbackName = displayName.trim() || `${nip19.npubEncode(pubkeyHex).slice(0, 10)}...`;
+
     const identity: IdentityRecord = {
       pubkey: pubkeyHex,
-      displayName: displayName.trim(),
+      displayName: fallbackName,
       isExtension: true,
       isCurrent: 1,
       createdAt: Date.now(),
     };
 
     await db.identities.put(identity);
+
+    if (!displayName.trim()) {
+      this.fetchProfileMetadata(pubkeyHex).then((profileName) => {
+        if (profileName) {
+          this.updateDisplayName(profileName);
+        }
+      });
+    }
+
     return identity;
+  }
+
+  /**
+   * Fetches NIP-01 Kind 0 profile metadata from Nostr relays.
+   */
+  async fetchProfileMetadata(pubkeyHex: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      let resolved = false;
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          resolve(null);
+        }
+      }, 3000);
+
+      try {
+        const unsubscribe = relayManager.subscribe(
+          [{ kinds: [0], authors: [pubkeyHex], limit: 1 }],
+          (event) => {
+            if (resolved) return;
+            try {
+              const profile = JSON.parse(event.content);
+              const name = profile.display_name || profile.name || profile.displayName;
+              if (name && typeof name === 'string' && name.trim()) {
+                resolved = true;
+                clearTimeout(timeout);
+                unsubscribe();
+                resolve(name.trim());
+              }
+            } catch {
+              // ignore invalid JSON
+            }
+          }
+        );
+      } catch {
+        resolve(null);
+      }
+    });
   }
 
   /**
@@ -127,7 +189,14 @@ export class IdentityService {
     if (!current) return;
 
     await db.identities.update(current.pubkey, { displayName: trimmed });
-    await db.members.where({ pubkey: current.pubkey }).modify({ displayName: trimmed });
+
+    // Self-heal & update all member records across all groups in IndexedDB
+    const allMembers = await db.members.toArray();
+    for (const member of allMembers) {
+      if (member.id !== undefined && member.pubkey.toLowerCase() === current.pubkey.toLowerCase()) {
+        await db.members.update(member.id, { displayName: trimmed });
+      }
+    }
   }
 
   /**

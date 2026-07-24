@@ -2,6 +2,7 @@ import { db, type GroupRecord, type MemberRecord } from '../db/SliceWyseDatabase
 import { Group } from '../../domain/entities/Group';
 import { Member } from '../../domain/entities/Member';
 import { Pubkey } from '../../domain/value-objects/Pubkey';
+import { identityService } from '../identity/IdentityService';
 
 export class DexieGroupRepository {
   async saveGroup(group: Group): Promise<void> {
@@ -40,15 +41,27 @@ export class DexieGroupRepository {
     const groupRecord = await db.groups.get(groupId);
     if (!groupRecord) return null;
 
+    const currentIdentity = await identityService.getCurrentIdentity();
     const memberRecords = await db.members.where({ groupId }).toArray();
-    const members = memberRecords.map(
-      (m) =>
-        new Member({
-          pubkey: new Pubkey(m.pubkey),
-          displayName: m.displayName,
-          joinedAt: m.joinedAt,
-        })
-    );
+
+    const members = memberRecords.map((m) => {
+      let displayName = m.displayName;
+      if (
+        currentIdentity &&
+        m.pubkey.toLowerCase() === currentIdentity.pubkey.toLowerCase() &&
+        currentIdentity.displayName &&
+        currentIdentity.displayName !== 'Nostr User' &&
+        currentIdentity.displayName !== 'Nostr Extension User'
+      ) {
+        displayName = currentIdentity.displayName;
+      }
+
+      return new Member({
+        pubkey: new Pubkey(m.pubkey),
+        displayName,
+        joinedAt: m.joinedAt,
+      });
+    });
 
     return new Group({
       id: groupRecord.id,
