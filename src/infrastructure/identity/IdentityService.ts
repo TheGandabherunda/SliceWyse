@@ -115,6 +115,22 @@ export class IdentityService {
   }
 
   /**
+   * Updates display name for current identity and syncs across all member records in local groups.
+   */
+  async updateDisplayName(newName: string): Promise<void> {
+    const trimmed = newName.trim();
+    if (!trimmed) {
+      throw new Error('Display name cannot be empty');
+    }
+
+    const current = await this.getCurrentIdentity();
+    if (!current) return;
+
+    await db.identities.update(current.pubkey, { displayName: trimmed });
+    await db.members.where({ pubkey: current.pubkey }).modify({ displayName: trimmed });
+  }
+
+  /**
    * Checks if NIP-07 extension is available in the environment.
    */
   isExtensionAvailable(): boolean {

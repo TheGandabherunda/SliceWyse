@@ -3,9 +3,10 @@
   import { identityService } from '../../infrastructure/identity/IdentityService';
   import type { Group } from '../../domain/entities/Group';
   import type { IdentityRecord } from '../../infrastructure/db/SliceWyseDatabase';
+  import EditProfileModal from '../components/EditProfileModal.svelte';
   import SyncStatusBadge from '../components/SyncStatusBadge.svelte';
   import CreateGroupModal from '../components/CreateGroupModal.svelte';
-  import { Plus, Users, Sparkles, UserCheck } from 'lucide-svelte';
+  import { Plus, Users, Sparkles, UserCheck, Edit2 } from 'lucide-svelte';
 
   interface Props {
     onSelectGroup: (groupId: string) => void;
@@ -16,6 +17,7 @@
   let groups = $state<Group[]>([]);
   let currentIdentity = $state<IdentityRecord | null>(null);
   let isCreateModalOpen = $state(false);
+  let isEditProfileOpen = $state(false);
 
   const groupRepo = new DexieGroupRepository();
 
@@ -39,10 +41,16 @@
     <div class="header-right">
       <SyncStatusBadge />
       {#if currentIdentity}
-        <div class="user-badge">
+        <button
+          type="button"
+          class="user-badge clickable"
+          onclick={() => (isEditProfileOpen = true)}
+          title="Click to change your display name"
+        >
           <UserCheck size={18} />
           <span class="user-name">{currentIdentity.displayName}</span>
-        </div>
+          <Edit2 size={12} class="edit-icon" />
+        </button>
       {/if}
     </div>
   </header>
@@ -94,6 +102,15 @@
     onClose={() => (isCreateModalOpen = false)}
     onCreated={loadData}
   />
+
+  {#if currentIdentity}
+    <EditProfileModal
+      isOpen={isEditProfileOpen}
+      currentName={currentIdentity.displayName}
+      onClose={() => (isEditProfileOpen = false)}
+      onUpdated={loadData}
+    />
+  {/if}
 </div>
 
 <style>
@@ -141,6 +158,17 @@
     border-radius: 20px;
     font-size: 0.875rem;
     font-weight: 500;
+    font-family: inherit;
+
+    &.clickable {
+      cursor: pointer;
+      transition: all var(--transition-fast);
+
+      &:hover {
+        background: rgba(16, 185, 129, 0.25);
+        border-color: var(--accent-primary);
+      }
+    }
   }
 
   .section-title-bar {
