@@ -19,11 +19,19 @@
   let isCreateModalOpen = $state(false);
   let isEditProfileOpen = $state(false);
 
+  import { syncCoordinator } from '../../application/services/SyncCoordinator';
+
   const groupRepo = new DexieGroupRepository();
 
   async function loadData() {
     currentIdentity = (await identityService.getCurrentIdentity()) ?? null;
     groups = await groupRepo.getAllGroups();
+
+    if (currentIdentity) {
+      syncCoordinator.subscribeUserEvents(currentIdentity.pubkey, async () => {
+        groups = await groupRepo.getAllGroups();
+      });
+    }
   }
 
   $effect(() => {

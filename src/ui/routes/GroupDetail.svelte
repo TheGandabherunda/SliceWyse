@@ -3,6 +3,8 @@
   import { DexieExpenseRepository } from '../../infrastructure/repositories/DexieExpenseRepository';
   import { DexieSettlementRepository } from '../../infrastructure/repositories/DexieSettlementRepository';
   import { DebtSimplifier, type DirectTransfer } from '../../domain/services/DebtSimplifier';
+  import { syncCoordinator } from '../../application/services/SyncCoordinator';
+  import { identityService } from '../../infrastructure/identity/IdentityService';
   import type { Group } from '../../domain/entities/Group';
   import type { Expense } from '../../domain/entities/Expense';
   import type { Settlement } from '../../domain/entities/Settlement';
@@ -56,6 +58,13 @@
     );
 
     simplifiedTransfers = DebtSimplifier.simplifyDebts(netBalances, group.currency);
+
+    const currentIdentity = await identityService.getCurrentIdentity();
+    if (currentIdentity) {
+      syncCoordinator.subscribeUserEvents(currentIdentity.pubkey, () => {
+        loadData();
+      });
+    }
   }
 
   $effect(() => {

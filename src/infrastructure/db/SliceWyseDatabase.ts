@@ -64,12 +64,22 @@ export interface SyncQueueRecord {
   lastAttemptAt: number;
 }
 
+export interface EventRecord {
+  id: string;
+  kind: number;
+  pubkey: string;
+  createdAt: number;
+  groupId: string;
+  rawEvent: string;
+}
+
 export class SliceWyseDatabase extends Dexie {
   identities!: EntityTable<IdentityRecord, 'pubkey'>;
   groups!: EntityTable<GroupRecord, 'id'>;
   members!: EntityTable<MemberRecord, 'id'>;
   expenses!: EntityTable<ExpenseRecord, 'id'>;
   settlements!: EntityTable<SettlementRecord, 'id'>;
+  events!: EntityTable<EventRecord, 'id'>;
   sync_queue!: EntityTable<SyncQueueRecord, 'id'>;
 
   constructor() {
@@ -80,6 +90,7 @@ export class SliceWyseDatabase extends Dexie {
       members: '++id, groupId, pubkey, [groupId+pubkey]',
       expenses: 'id, groupId, date, isDeleted, syncStatus',
       settlements: 'id, groupId, date, syncStatus',
+      events: 'id, kind, pubkey, groupId',
       sync_queue: '++id, eventId, groupId, attempts',
     });
   }

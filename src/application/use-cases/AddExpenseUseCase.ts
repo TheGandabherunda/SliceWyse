@@ -2,6 +2,7 @@ import { Expense, type SplitType } from '../../domain/entities/Expense';
 import { Money } from '../../domain/value-objects/Money';
 import { identityService } from '../../infrastructure/identity/IdentityService';
 import { DexieExpenseRepository } from '../../infrastructure/repositories/DexieExpenseRepository';
+import { syncCoordinator } from '../services/SyncCoordinator';
 
 export interface AddExpenseInput {
   groupId: string;
@@ -57,6 +58,31 @@ export class AddExpenseUseCase {
     });
 
     await this.expenseRepo.saveExpense(expense);
+
+    // Enqueue encrypted expense event for Nostr relay sync
+    const expensePayload = {
+      v: expense.version,
+      type: 'EXPENSE_CREATED',
+      groupId: expense.groupId,
+      expenseId: expense.id,
+      title: expense.title,
+      amountCents: expense.amount.amountCents,
+      currency: expense.amount.currency,
+      paidBy: expense.paidBy.map((p) => ({ pubkey: p.pubkey, amountCents: p.amount.amountCents })),
+      splits: expense.splits.map((s) => ({ pubkey: s.pubkey, amountCents: s.amount.amountCents })),
+      splitType: expense.splitType,
+      date: expense.date,
+      previousVersionId: expense.previousVersionId,
+      createdBy: expense.createdBy,
+    };
+
+    await syncCoordinator.enqueueEvent(
+      expense.groupId,
+      30079,
+      JSON.stringify(expensePayload),
+      input.participantPubkeys
+    );
+
     return expense;
   }
 }

@@ -3,6 +3,7 @@ import { Member } from '../../domain/entities/Member';
 import { Pubkey } from '../../domain/value-objects/Pubkey';
 import { identityService } from '../../infrastructure/identity/IdentityService';
 import { DexieGroupRepository } from '../../infrastructure/repositories/DexieGroupRepository';
+import { syncCoordinator } from '../services/SyncCoordinator';
 
 export interface CreateGroupInput {
   name: string;
@@ -37,6 +38,27 @@ export class CreateGroupUseCase {
     });
 
     await this.groupRepo.saveGroup(group);
+
+    // Enqueue encrypted group creation event for Nostr relay sync
+    const groupPayload = {
+      groupId: group.id,
+      name: group.name,
+      currency: group.currency,
+      members: group.members.map((m) => ({
+        pubkey: m.pubkey.value,
+        displayName: m.displayName,
+        joinedAt: m.joinedAt,
+      })),
+      createdAt: group.createdAt,
+    };
+
+    await syncCoordinator.enqueueEvent(
+      group.id,
+      30078,
+      JSON.stringify(groupPayload),
+      group.members.map((m) => m.pubkey.value)
+    );
+
     return group;
   }
 }
