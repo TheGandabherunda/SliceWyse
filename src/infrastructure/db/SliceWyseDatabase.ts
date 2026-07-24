@@ -60,6 +60,7 @@ export interface SyncQueueRecord {
   groupId: string;
   eventKind: number;
   payloadJson: string;
+  recipientsJson?: string;
   attempts: number;
   lastAttemptAt: number;
 }

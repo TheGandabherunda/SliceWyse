@@ -137,25 +137,29 @@ export class IdentityService {
   async fetchProfileMetadata(pubkeyHex: string): Promise<string | null> {
     return new Promise((resolve) => {
       let resolved = false;
+      let subClose: (() => void) | null = null;
+
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
+          if (subClose) subClose();
           resolve(null);
         }
       }, 8000);
 
       try {
-        const unsubscribe = relayManager.subscribe(
+        subClose = relayManager.subscribe(
           [{ kinds: [0], authors: [pubkeyHex], limit: 1 }],
           (event) => {
             if (resolved) return;
             try {
               const profile = JSON.parse(event.content);
-              const name = profile.display_name || profile.name || profile.displayName;
+              const name =
+                profile.display_name || profile.name || profile.displayName || profile.username;
               if (name && typeof name === 'string' && name.trim()) {
                 resolved = true;
                 clearTimeout(timeout);
-                unsubscribe();
+                if (subClose) subClose();
                 resolve(name.trim());
               }
             } catch {

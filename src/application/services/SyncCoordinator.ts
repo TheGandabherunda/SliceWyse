@@ -31,6 +31,7 @@ export class SyncCoordinator {
       groupId,
       eventKind,
       payloadJson,
+      recipientsJson: JSON.stringify(recipientPubkeys),
       attempts: 0,
       lastAttemptAt: Date.now(),
     });
@@ -56,13 +57,19 @@ export class SyncCoordinator {
 
       for (const item of pendingItems) {
         try {
+          const itemRecipients: string[] = item.recipientsJson
+            ? JSON.parse(item.recipientsJson)
+            : recipientPubkeys;
+
           const tags: string[][] = [
             ['d', item.groupId],
             ['e_id', item.eventId],
           ];
 
-          for (const recipient of recipientPubkeys) {
-            tags.push(['p', recipient]);
+          for (const recipient of itemRecipients) {
+            if (recipient && !tags.some((t) => t[0] === 'p' && t[1] === recipient)) {
+              tags.push(['p', recipient]);
+            }
           }
 
           const nostrEvent = await identityService.signEvent({
@@ -103,10 +110,12 @@ export class SyncCoordinator {
       {
         kinds: [30078, 30079, 30080, 30081],
         authors: [pubkeyHex],
+        limit: 500,
       },
       {
         kinds: [30078, 30079, 30080, 30081],
         '#p': [pubkeyHex],
+        limit: 500,
       },
     ];
 
