@@ -173,7 +173,26 @@ export class IdentityService {
    * Retrieves current active identity.
    */
   async getCurrentIdentity(): Promise<IdentityRecord | undefined> {
-    return await db.identities.where({ isCurrent: 1 }).first();
+    const current = await db.identities.where({ isCurrent: 1 }).first();
+    if (current && this.isGenericName(current.displayName)) {
+      this.fetchProfileMetadata(current.pubkey).then((profileName) => {
+        if (profileName) {
+          this.updateDisplayName(profileName);
+        }
+      });
+    }
+    return current;
+  }
+
+  private isGenericName(name?: string): boolean {
+    if (!name || !name.trim()) return true;
+    const trimmed = name.trim().toLowerCase();
+    return (
+      trimmed === 'nostr user' ||
+      trimmed === 'nostr extension user' ||
+      trimmed === 'user' ||
+      trimmed.startsWith('npub1')
+    );
   }
 
   /**

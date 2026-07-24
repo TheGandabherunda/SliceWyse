@@ -39,7 +39,7 @@
     try {
       isLoading = true;
       errorMsg = '';
-      await identityService.connectExtension(displayName.trim() || 'Nostr User');
+      await identityService.connectExtension(displayName.trim());
       onComplete();
     } catch (err: unknown) {
       errorMsg = err instanceof Error ? err.message : 'Failed to connect extension';

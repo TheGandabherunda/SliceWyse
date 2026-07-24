@@ -1,6 +1,12 @@
 import { SimplePool, type Event as NostrEvent, type Filter } from 'nostr-tools';
 
-export const DEFAULT_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
+export const DEFAULT_RELAYS = [
+  'wss://purplepag.es',
+  'wss://relay.damus.io',
+  'wss://nos.lol',
+  'wss://relay.nostr.band',
+  'wss://relay.snort.social',
+];
 
 export interface RelayStatus {
   url: string;
