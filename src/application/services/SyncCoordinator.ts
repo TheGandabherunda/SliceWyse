@@ -189,13 +189,11 @@ export class SyncCoordinator {
       }
     };
 
-    // Idempotent Check: If session is already active for this identity, do NOT restart history sync
     if (this.activeSessionPubkey === pubkeyHex) {
       console.log(`SYNC session already active ${pubkeyHex}`);
       return unsubscribeListener;
     }
 
-    // Stop existing session if switching identity
     if (this.activeSessionPubkey && this.activeSessionPubkey !== pubkeyHex) {
       this.stopSession();
     }
@@ -203,7 +201,6 @@ export class SyncCoordinator {
     this.activeSessionPubkey = pubkeyHex;
     console.log(`SYNC session start ${pubkeyHex}`);
 
-    // Execute 4-Stage History Sync ONCE under in-flight guard
     await this.runHistoricalSync(pubkeyHex);
 
     return unsubscribeListener;
@@ -225,26 +222,7 @@ export class SyncCoordinator {
       const giftWrapEvents = await relayManager.queryEvents(giftWrapFilters as any);
 
       for (const gwEvent of giftWrapEvents) {
-        if (this.processedEventIds.has(gwEvent.id)) {
-          console.log(`SYNC event duplicate ${gwEvent.id}`);
-          continue;
-        }
-        this.processedEventIds.add(gwEvent.id);
-
-        console.log(`SYNC giftwrap received ${gwEvent.id}`);
-        if (currentIdentity && currentIdentity.secretKey) {
-          const unwrapped = nip59GiftWrapService.decryptGiftWrap(
-            gwEvent,
-            currentIdentity.secretKey
-          );
-          if (unwrapped) {
-            console.log(`SYNC giftwrap unwrapped ${gwEvent.id}`);
-            console.log(
-              `SYNC group key recovered ${unwrapped.envelope.groupId} ${unwrapped.envelope.keyVersion}`
-            );
-            await this.storeGroupKey(unwrapped.envelope);
-          }
-        }
+        await this.ingestEvent(gwEvent);
       }
 
       // Stage 2: Discover all group IDs from stored group keys
@@ -338,32 +316,43 @@ export class SyncCoordinator {
 
   /**
    * Ingests, verifies signatures, decrypts AES-256-GCM, and persists an incoming Nostr event.
-   * Performs event-level deduplication BEFORE expensive cryptographic processing.
+   * Fully instrumented with post-verification diagnostics and error boundaries.
    */
   private async ingestEvent(event: NostrEvent): Promise<void> {
+    console.log(`SYNC enter event processing ${event.id} ${event.kind}`);
+
+    // 1. Event-Level Deduplication before crypto processing
+    if (this.processedEventIds.has(event.id)) {
+      console.log(`SYNC early return: duplicate ignored ${event.id}`);
+      return;
+    }
+    this.processedEventIds.add(event.id);
+
     try {
-      // Event-Level Deduplication before crypto processing
-      if (this.processedEventIds.has(event.id)) {
-        console.log(`SYNC event duplicate ${event.id}`);
+      const existing = await db.events.get(event.id);
+      if (existing) {
+        console.log(`SYNC early return: event already in DB ${event.id}`);
         return;
       }
-      this.processedEventIds.add(event.id);
 
-      const existing = await db.events.get(event.id);
-      if (existing) return;
-
-      // Signature Verification
+      // 2. Signature Verification
       if (!verifyEvent(event)) {
+        console.log(`SYNC early return: signature verification failed ${event.id}`);
         return;
       }
       console.log(`SYNC signature verified ${event.id}`);
 
+      // POST-SIGNATURE VERIFICATION PIPELINE
       const currentIdentity = await identityService.getCurrentIdentity();
-      if (!currentIdentity) return;
+      if (!currentIdentity) {
+        console.log(`SYNC early return: no current identity ${event.id}`);
+        return;
+      }
 
       // Handle Gift Wrap (Kind 1059)
       if (event.kind === 1059) {
         if (currentIdentity.secretKey) {
+          console.log(`SYNC beginning giftwrap unwrap ${event.id}`);
           const unwrapped = nip59GiftWrapService.decryptGiftWrap(event, currentIdentity.secretKey);
           if (unwrapped) {
             console.log(`SYNC giftwrap unwrapped ${event.id}`);
@@ -371,40 +360,81 @@ export class SyncCoordinator {
               `SYNC group key recovered ${unwrapped.envelope.groupId} ${unwrapped.envelope.keyVersion}`
             );
             await this.storeGroupKey(unwrapped.envelope);
+          } else {
+            console.log(`SYNC early return: giftwrap decrypt returned null ${event.id}`);
           }
+        } else {
+          console.log(`SYNC early return: no secretKey for giftwrap ${event.id}`);
         }
         return;
       }
 
+      // 4. Extracted groupId
       const groupIdTag = event.tags.find((t) => t[0] === 'd');
       const groupId = groupIdTag ? groupIdTag[1] : '';
+      console.log(`SYNC extracted groupId ${groupId || 'EMPTY'} for ${event.id}`);
 
-      // Locate Group Key for AES-256-GCM decryption
-      const groupKeys = await db.group_keys.where({ groupId }).toArray();
+      if (!groupId) {
+        console.log(`SYNC early return: missing groupId ${event.id}`);
+        return;
+      }
+
+      // 6. Looking up group key in Dexie DB
+      console.log(`SYNC looking up group key ${groupId}`);
+      const groupKeys = await db.group_keys.where('groupId').equals(groupId).toArray();
       let decryptedPayload: any = null;
 
       if (groupKeys.length > 0) {
+        console.log(`SYNC group key found ${groupId} (count: ${groupKeys.length})`);
+        console.log(`SYNC beginning payload decryption ${event.id}`);
+
         for (const k of groupKeys) {
           try {
             const decryptedJson = await aesGcmCryptoService.decrypt(event.content, k.groupKeyHex);
+            console.log(`SYNC decryption succeeded ${event.id}`);
+            console.log(`SYNC beginning JSON parse ${event.id}`);
             decryptedPayload = JSON.parse(decryptedJson);
-            console.log(`SYNC decrypted ${event.id}`);
+            console.log(`SYNC JSON parse succeeded ${event.id}`);
+            // 5. Extracted key version
+            console.log(
+              `SYNC extracted key version ${decryptedPayload.keyVersion ?? k.keyVersion} for ${event.id}`
+            );
             break;
-          } catch {
-            // Try next key version
+          } catch (decryptErr: any) {
+            console.log(
+              `SYNC decrypt failed for key version ${k.keyVersion} on ${event.id}: ${
+                decryptErr?.message || String(decryptErr)
+              }`
+            );
           }
         }
       } else {
+        console.log(`SYNC group key not found ${groupId}`);
+        console.log(`SYNC attempting plaintext JSON parse fallback for ${event.id}`);
         try {
           decryptedPayload = JSON.parse(event.content);
-        } catch {
+          console.log(`SYNC JSON parse succeeded for fallback ${event.id}`);
+        } catch (jsonErr: any) {
+          console.log(
+            `SYNC early return: JSON parse failed for fallback ${event.id}: ${
+              jsonErr?.message || String(jsonErr)
+            }`
+          );
           return;
         }
       }
 
-      if (!decryptedPayload) return;
+      if (!decryptedPayload) {
+        console.log(`SYNC early return: decrypt failed / no valid payload ${event.id}`);
+        return;
+      }
 
+      // 12. Beginning domain model reconstruction
+      console.log(`SYNC beginning domain model reconstruction ${event.id}`);
       const parentEventIds = decryptedPayload.parentEventIds ?? [];
+
+      // 13. Beginning persistence to IndexedDB
+      console.log(`SYNC beginning persistence ${event.id}`);
 
       await db.events.put({
         id: event.id,
@@ -426,11 +456,25 @@ export class SyncCoordinator {
       } else if (event.kind === 1502) {
         const settlement = EventReducer.reduceSettlement(decryptedPayload);
         await this.settlementRepo.saveSettlement(settlement);
+      } else {
+        console.log(`SYNC early return: unsupported event kind ${event.kind} for ${event.id}`);
+        return;
       }
 
+      // 14. Persistence succeeded
       console.log(`SYNC persisted ${event.id}`);
-    } catch {
-      // Ignore unparseable events
+
+      // 15. UI/store listeners notified
+      console.log(`SYNC listeners notified ${event.id}`);
+      this.notifyListeners();
+
+      // 16. Event processing completed successfully
+      console.log(`SYNC event processing completed ${event.id}`);
+    } catch (error: any) {
+      console.error(
+        `SYNC event processing error ${event.id} ${event.kind}: ${error?.message || String(error)}`,
+        error?.stack
+      );
     }
   }
 
