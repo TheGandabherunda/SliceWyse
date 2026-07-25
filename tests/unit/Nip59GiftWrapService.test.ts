@@ -7,7 +7,7 @@ import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 import { bytesToHex } from 'nostr-tools/utils';
 
 describe('Nip59GiftWrapService', () => {
-  it('creates and decrypts NIP-59 Gift Wrap key envelopes using NIP-44 v2', async () => {
+  it('creates and decrypts NIP-59 Gift Wrap key envelopes using NIP-44 v2', () => {
     const aliceSecretBytes = generateSecretKey();
     const aliceSecretHex = bytesToHex(aliceSecretBytes);
     const alicePubkey = getPublicKey(aliceSecretBytes);
@@ -25,22 +25,15 @@ describe('Nip59GiftWrapService', () => {
     };
 
     // Alice creates Gift Wrap for Bob
-    const giftWrapEvent = await nip59GiftWrapService.createGiftWrap(
-      envelope,
-      aliceSecretHex,
-      bobPubkey
-    );
+    const giftWrapEvent = nip59GiftWrapService.createGiftWrap(envelope, aliceSecretHex, bobPubkey);
     expect(giftWrapEvent.kind).toBe(1059);
     expect(giftWrapEvent.tags).toEqual([['p', bobPubkey]]);
 
     // Bob decrypts Gift Wrap from Alice
-    const decrypted = nip59GiftWrapService.decryptGiftWrap(
-      giftWrapEvent,
-      bobSecretHex,
-      alicePubkey
-    );
-    expect(decrypted).not.toBeNull();
-    expect(decrypted?.groupId).toBe('grp_123');
-    expect(decrypted?.groupKey).toBe(envelope.groupKey);
+    const result = nip59GiftWrapService.decryptGiftWrap(giftWrapEvent, bobSecretHex);
+    expect(result).not.toBeNull();
+    expect(result?.envelope.groupId).toBe('grp_123');
+    expect(result?.envelope.groupKey).toBe(envelope.groupKey);
+    expect(result?.senderPubkey).toBe(alicePubkey);
   });
 });

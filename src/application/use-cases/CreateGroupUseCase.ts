@@ -14,7 +14,7 @@ import { db } from '../../infrastructure/db/SliceWyseDatabase';
 export interface CreateGroupInput {
   name: string;
   currency: string;
-  memberNames?: string[];
+  memberPubkeys?: Array<{ pubkey: string; displayName?: string }>;
 }
 
 export class CreateGroupUseCase {
@@ -38,16 +38,14 @@ export class CreateGroupUseCase {
 
     const members: Member[] = [creatorMember];
 
-    if (input.memberNames && input.memberNames.length > 0) {
-      for (const name of input.memberNames) {
-        if (name.trim().length > 0) {
-          const dummySecret =
-            crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
-          const dummyPubkey = dummySecret.slice(0, 64);
+    if (input.memberPubkeys && input.memberPubkeys.length > 0) {
+      for (const m of input.memberPubkeys) {
+        if (m.pubkey && m.pubkey.trim().length > 0 && m.pubkey !== currentIdentity.pubkey) {
+          const validatedPubkey = new Pubkey(m.pubkey.trim());
           members.push(
             new Member({
-              pubkey: new Pubkey(dummyPubkey),
-              displayName: name.trim(),
+              pubkey: validatedPubkey,
+              displayName: m.displayName?.trim() || `Member ${validatedPubkey.value.slice(0, 8)}`,
               joinedAt: Date.now(),
             })
           );
@@ -88,14 +86,15 @@ export class CreateGroupUseCase {
 
       for (const member of group.members) {
         try {
-          const giftWrapEvent = await nip59GiftWrapService.createGiftWrap(
+          const giftWrapEvent = nip59GiftWrapService.createGiftWrap(
             envelope,
             currentIdentity.secretKey,
             member.pubkey.value
           );
-          await syncCoordinator.enqueueEvent(group.id, 1059, giftWrapEvent, [member.pubkey.value]);
+          // Enqueue PRE-SIGNED Nostr event (Kind 1059) so it is published UNCHANGED without re-signing
+          await syncCoordinator.enqueueSignedEvent(giftWrapEvent, group.id, member.pubkey.value);
         } catch {
-          // Ignore key envelope send errors for offline/dummy members
+          // Ignore key envelope send errors for uncontactable members
         }
       }
     }

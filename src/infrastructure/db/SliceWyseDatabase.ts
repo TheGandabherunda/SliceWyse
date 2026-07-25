@@ -70,6 +70,7 @@ export interface SyncQueueRecord {
   groupId: string;
   eventKind: number;
   payloadJson: string;
+  signedNostrEventJson?: string; // Serialized pre-signed Nostr event (e.g. Kind 1059 Gift Wrap)
   recipientsJson?: string;
   status: 'QUEUED' | 'PUBLISHING' | 'ACCEPTED_BY_ONE_RELAY' | 'REPLICATED' | 'RETRY_REQUIRED';
   acceptedRelaysJson?: string;

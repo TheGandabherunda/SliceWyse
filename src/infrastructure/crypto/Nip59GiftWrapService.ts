@@ -1,11 +1,6 @@
-import {
-  generateSecretKey,
-  getPublicKey,
-  finalizeEvent,
-  type Event as NostrEvent,
-} from 'nostr-tools/pure';
-import { nip44 } from 'nostr-tools';
-import { hexToBytes, bytesToHex } from 'nostr-tools/utils';
+import * as nip59 from 'nostr-tools/nip59';
+import { hexToBytes } from 'nostr-tools/utils';
+import { type Event as NostrEvent } from 'nostr-tools/pure';
 
 export interface GroupKeyEnvelope {
   protocolVersion: number;
@@ -17,98 +12,63 @@ export interface GroupKeyEnvelope {
 
 export class Nip59GiftWrapService {
   /**
-   * Constructs a NIP-59 Gift Wrap (Kind 1059) event containing an encrypted group key envelope.
+   * Constructs a NIP-59 Gift Wrap (Kind 1059) event wrapping a NIP-59 Seal (Kind 13) and Rumor (Kind 14).
+   * Outer Gift Wrap uses an ephemeral keypair and randomized timestamp.
+   * Sender identity is hidden inside the NIP-59 seal.
    */
-  async createGiftWrap(
+  createGiftWrap(
     envelope: GroupKeyEnvelope,
     senderSecretKeyHex: string,
     recipientPubkeyHex: string
-  ): Promise<NostrEvent> {
-    const jsonPayload = JSON.stringify(envelope);
+  ): NostrEvent {
     const senderSecretBytes = hexToBytes(senderSecretKeyHex);
+    const jsonPayload = JSON.stringify(envelope);
 
-    // Derive NIP-44 v2 conversation key between sender identity and recipient identity
-    const conversationKey = nip44.v2.utils.getConversationKey(
-      senderSecretBytes,
-      recipientPubkeyHex
-    );
-    const encryptedContent = nip44.v2.encrypt(jsonPayload, conversationKey);
-
-    // Inner rumor event (Kind 14)
-    const rumor = {
+    // Inner rumor event template (Kind 14)
+    const rumorTemplate = {
       kind: 14,
       created_at: Math.floor(Date.now() / 1000),
       tags: [
         ['p', recipientPubkeyHex],
         ['d', `key_env:${envelope.groupId}:${envelope.keyVersion}`],
       ],
-      content: encryptedContent,
+      content: jsonPayload,
     };
 
-    // Ephemeral outer key for NIP-59 Gift Wrap privacy
-    const ephemeralSecretBytes = generateSecretKey();
-
-    // Randomize created_at up to 2 days (172,800 seconds) in the past per NIP-59 spec
-    const randomOffset = Math.floor(Math.random() * 172800);
-    const randomizedCreatedAt = Math.floor(Date.now() / 1000) - randomOffset;
-
-    const giftWrapEvent = finalizeEvent(
-      {
-        kind: 1059,
-        created_at: randomizedCreatedAt,
-        tags: [['p', recipientPubkeyHex]],
-        content: JSON.stringify(rumor),
-      },
-      ephemeralSecretBytes
-    );
-
+    // wrapEvent automatically builds rumor, creates NIP-59 seal (Kind 13), and wraps in Kind 1059 Gift Wrap
+    const giftWrapEvent = nip59.wrapEvent(rumorTemplate, senderSecretBytes, recipientPubkeyHex);
     return giftWrapEvent;
   }
 
   /**
-   * Decrypts a NIP-59 Gift Wrap (Kind 1059) key envelope event.
+   * Unwraps a NIP-59 Gift Wrap (Kind 1059) event and extracts the GroupKeyEnvelope.
+   * Validates inner sender identity from seal, NOT from outer ephemeral pubkey.
    */
   decryptGiftWrap(
     giftWrapEvent: NostrEvent,
-    recipientSecretKeyHex: string,
-    senderPubkeyHex: string
-  ): GroupKeyEnvelope | null {
+    recipientSecretKeyHex: string
+  ): { envelope: GroupKeyEnvelope; senderPubkey: string } | null {
     try {
-      if (
-        giftWrapEvent.kind !== 1059 &&
-        giftWrapEvent.kind !== 14 &&
-        giftWrapEvent.kind !== 30078
-      ) {
+      if (giftWrapEvent.kind !== 1059) {
         return null;
       }
 
-      let payloadToDecrypt = giftWrapEvent.content;
+      const recipientSecretBytes = hexToBytes(recipientSecretKeyHex);
+      const unwrappedRumor = nip59.unwrapEvent(giftWrapEvent, recipientSecretBytes);
 
-      // Handle raw or wrapped rumor content
-      if (giftWrapEvent.content.startsWith('{')) {
-        try {
-          const parsed = JSON.parse(giftWrapEvent.content);
-          if (parsed.content) {
-            payloadToDecrypt = parsed.content;
-          }
-        } catch {
-          // Use raw content if not JSON
-        }
+      if (!unwrappedRumor || !unwrappedRumor.pubkey) {
+        return null;
       }
 
-      const recipientSecretBytes = hexToBytes(recipientSecretKeyHex);
-      const conversationKey = nip44.v2.utils.getConversationKey(
-        recipientSecretBytes,
-        senderPubkeyHex
-      );
-      const decryptedJson = nip44.v2.decrypt(payloadToDecrypt, conversationKey);
-
-      const envelope = JSON.parse(decryptedJson) as GroupKeyEnvelope;
+      const envelope = JSON.parse(unwrappedRumor.content) as GroupKeyEnvelope;
       if (!envelope.groupId || !envelope.groupKey || !envelope.keyVersion) {
         return null;
       }
 
-      return envelope;
+      return {
+        envelope,
+        senderPubkey: unwrappedRumor.pubkey, // Real verified sender pubkey from NIP-59 seal
+      };
     } catch {
       return null;
     }
