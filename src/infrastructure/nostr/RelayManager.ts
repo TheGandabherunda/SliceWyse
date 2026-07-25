@@ -51,24 +51,15 @@ export class RelayManager {
         const relayUrl = targetRelays[idx];
         try {
           const res = await promise;
-          // NIP-20 OK validation check
-          if (
-            res === '' ||
-            res === 'success' ||
-            res === event.id ||
-            (typeof res === 'string' &&
-              !res.toLowerCase().includes('failed') &&
-              !res.toLowerCase().includes('error') &&
-              !res.toLowerCase().includes('timeout') &&
-              !res.toLowerCase().includes('blocked') &&
-              !res.toLowerCase().includes('pow'))
-          ) {
+          // In nostr-tools, a resolved promise indicates NIP-20 OK: true (with optional reason string).
+          // Connection failures return string starting with "connection failure:".
+          if (typeof res === 'string' && res.startsWith('connection failure:')) {
+            this.relayHealth.set(relayUrl, { isHealthy: false, lastError: res });
+            console.log(`SYNC relay rejected ${relayUrl} ${res}`);
+          } else {
             acceptedRelays.push(relayUrl);
             this.relayHealth.set(relayUrl, { isHealthy: true });
             console.log(`SYNC relay accepted ${relayUrl}`);
-          } else {
-            this.relayHealth.set(relayUrl, { isHealthy: false, lastError: String(res) });
-            console.log(`SYNC relay rejected ${relayUrl} ${String(res)}`);
           }
         } catch (err: any) {
           const reason = err instanceof Error ? err.message : String(err);
