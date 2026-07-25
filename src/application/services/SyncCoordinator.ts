@@ -84,90 +84,102 @@ export class SyncCoordinator {
       lastAttemptAt: Date.now(),
     });
 
-    this.processSyncQueue([recipientPubkey]);
+    await this.processSyncQueue([recipientPubkey]);
   }
 
   /**
-   * State Machine Queue Processor: QUEUED -> PUBLISHING -> ACCEPTED_BY_ONE_RELAY / REPLICATED / RETRY_REQUIRED
+   * State Machine Queue Processor: QUEUED -> PUBLISHING -> ACCEPTED_BY_ONE_RELAY / REPLICATED / RETRY_REQUIRED.
+   * Loops continuously until all queued items are processed to avoid race conditions between enqueued events.
    */
   async processSyncQueue(recipientPubkeys: string[] = []): Promise<void> {
     if (this.isProcessingQueue) return;
     this.isProcessingQueue = true;
 
     try {
-      const allQueueItems = await db.sync_queue.toArray();
-      const pendingItems = allQueueItems.filter((item) =>
-        ['QUEUED', 'RETRY_REQUIRED', 'ACCEPTED_BY_ONE_RELAY'].includes(item.status)
-      );
+      while (true) {
+        const allQueueItems = await db.sync_queue.toArray();
+        const pendingItems = allQueueItems.filter((item) => item.status === 'QUEUED');
 
-      const currentIdentity = await identityService.getCurrentIdentity();
-      if (!currentIdentity) {
-        this.isProcessingQueue = false;
-        return;
-      }
+        if (pendingItems.length === 0) {
+          break;
+        }
 
-      for (const item of pendingItems) {
-        if (item.id === undefined) continue;
+        const currentIdentity = await identityService.getCurrentIdentity();
+        if (!currentIdentity) {
+          break;
+        }
 
-        await db.sync_queue.update(item.id, { status: 'PUBLISHING' });
+        for (const item of pendingItems) {
+          if (item.id === undefined) continue;
 
-        try {
-          let nostrEventToPublish: NostrEvent;
+          await db.sync_queue.update(item.id, { status: 'PUBLISHING' });
 
-          if (item.signedNostrEventJson) {
-            nostrEventToPublish = JSON.parse(item.signedNostrEventJson) as NostrEvent;
-          } else {
-            const itemRecipients: string[] = item.recipientsJson
-              ? JSON.parse(item.recipientsJson)
-              : recipientPubkeys;
+          try {
+            let nostrEventToPublish: NostrEvent;
 
-            const tags: string[][] = [
-              ['d', item.groupId],
-              ['e_id', item.eventId],
-            ];
+            if (item.signedNostrEventJson) {
+              nostrEventToPublish = JSON.parse(item.signedNostrEventJson) as NostrEvent;
+            } else {
+              const itemRecipients: string[] = item.recipientsJson
+                ? JSON.parse(item.recipientsJson)
+                : recipientPubkeys;
 
-            for (const recipient of itemRecipients) {
-              if (recipient && !tags.some((t) => t[0] === 'p' && t[1] === recipient)) {
-                tags.push(['p', recipient]);
+              const tags: string[][] = [
+                ['d', item.groupId],
+                ['e_id', item.eventId],
+              ];
+
+              for (const recipient of itemRecipients) {
+                if (recipient && !tags.some((t) => t[0] === 'p' && t[1] === recipient)) {
+                  tags.push(['p', recipient]);
+                }
               }
+
+              nostrEventToPublish = await identityService.signEvent({
+                kind: item.eventKind,
+                created_at: Math.floor(Date.now() / 1000),
+                tags,
+                content: item.payloadJson,
+              });
             }
 
-            nostrEventToPublish = await identityService.signEvent({
-              kind: item.eventKind,
-              created_at: Math.floor(Date.now() / 1000),
-              tags,
-              content: item.payloadJson,
-            });
-          }
+            console.log(
+              `SYNC publishing event before: kind=${nostrEventToPublish.kind} id=${nostrEventToPublish.id}`
+            );
 
-          console.log(`SYNC publish ${nostrEventToPublish.id}`);
+            const acceptedRelays = await relayManager.publishEvent(nostrEventToPublish);
 
-          const acceptedRelays = await relayManager.publishEvent(nostrEventToPublish);
+            console.log(
+              `SYNC publish result after: kind=${nostrEventToPublish.kind} id=${
+                nostrEventToPublish.id
+              } acceptedRelaysCount=${acceptedRelays.length} relays=${JSON.stringify(acceptedRelays)}`
+            );
 
-          if (acceptedRelays.length >= 2) {
-            await db.sync_queue.update(item.id, {
-              status: 'REPLICATED',
-              acceptedRelaysJson: JSON.stringify(acceptedRelays),
-            });
-            await db.sync_queue.delete(item.id);
-          } else if (acceptedRelays.length === 1) {
-            await db.sync_queue.update(item.id, {
-              status: 'ACCEPTED_BY_ONE_RELAY',
-              acceptedRelaysJson: JSON.stringify(acceptedRelays),
-            });
-          } else {
+            if (acceptedRelays.length >= 2) {
+              await db.sync_queue.update(item.id, {
+                status: 'REPLICATED',
+                acceptedRelaysJson: JSON.stringify(acceptedRelays),
+              });
+              await db.sync_queue.delete(item.id);
+            } else if (acceptedRelays.length === 1) {
+              await db.sync_queue.update(item.id, {
+                status: 'ACCEPTED_BY_ONE_RELAY',
+                acceptedRelaysJson: JSON.stringify(acceptedRelays),
+              });
+            } else {
+              await db.sync_queue.update(item.id, {
+                status: 'RETRY_REQUIRED',
+                attempts: item.attempts + 1,
+                lastAttemptAt: Date.now(),
+              });
+            }
+          } catch {
             await db.sync_queue.update(item.id, {
               status: 'RETRY_REQUIRED',
               attempts: item.attempts + 1,
               lastAttemptAt: Date.now(),
             });
           }
-        } catch {
-          await db.sync_queue.update(item.id, {
-            status: 'RETRY_REQUIRED',
-            attempts: item.attempts + 1,
-            lastAttemptAt: Date.now(),
-          });
         }
       }
     } finally {
@@ -220,6 +232,9 @@ export class SyncCoordinator {
       // Stage 1: Retrieve NIP-59 Gift Wrap events addressed to current identity (#p: [pubkeyHex])
       const giftWrapFilters = [{ kinds: [1059], '#p': [pubkeyHex], limit: 500 }];
       const giftWrapEvents = await relayManager.queryEvents(giftWrapFilters as any);
+      console.log(
+        `SYNC Stage 1: total Gift Wrap (Kind 1059) events fetched from relays: ${giftWrapEvents.length}`
+      );
 
       for (const gwEvent of giftWrapEvents) {
         await this.ingestEvent(gwEvent);
@@ -395,7 +410,6 @@ export class SyncCoordinator {
             console.log(`SYNC beginning JSON parse ${event.id}`);
             decryptedPayload = JSON.parse(decryptedJson);
             console.log(`SYNC JSON parse succeeded ${event.id}`);
-            // 5. Extracted key version
             console.log(
               `SYNC extracted key version ${decryptedPayload.keyVersion ?? k.keyVersion} for ${event.id}`
             );
