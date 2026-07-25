@@ -58,20 +58,33 @@
     );
 
     simplifiedTransfers = DebtSimplifier.simplifyDebts(netBalances, group.currency);
-
-    const currentIdentity = await identityService.getCurrentIdentity();
-    if (currentIdentity) {
-      syncCoordinator.subscribeUserEvents(currentIdentity.pubkey, () => {
-        loadData();
-      });
-    }
   }
 
   $effect(() => {
     void loadData();
-    return identityService.onIdentityChange(() => {
+
+    let unsubscribeSync: (() => void) | undefined;
+
+    identityService.getCurrentIdentity().then((identity) => {
+      if (identity) {
+        syncCoordinator
+          .subscribeUserEvents(identity.pubkey, () => {
+            void loadData();
+          })
+          .then((unsub) => {
+            unsubscribeSync = unsub;
+          });
+      }
+    });
+
+    const unsubscribeIdentity = identityService.onIdentityChange(() => {
       void loadData();
     });
+
+    return () => {
+      unsubscribeSync?.();
+      unsubscribeIdentity();
+    };
   });
 
   function getMemberName(pubkeyHex: string): string {
@@ -318,7 +331,8 @@
     gap: 1.25rem;
   }
 
-  .balance-card, .debts-card {
+  .balance-card,
+  .debts-card {
     padding: 1.25rem;
 
     h2 {

@@ -7,6 +7,7 @@
   import SyncStatusBadge from '../components/SyncStatusBadge.svelte';
   import CreateGroupModal from '../components/CreateGroupModal.svelte';
   import { Plus, Users, Sparkles, UserCheck, Edit2 } from 'lucide-svelte';
+  import { syncCoordinator } from '../../application/services/SyncCoordinator';
 
   interface Props {
     onSelectGroup: (groupId: string) => void;
@@ -19,27 +20,39 @@
   let isCreateModalOpen = $state(false);
   let isEditProfileOpen = $state(false);
 
-  import { syncCoordinator } from '../../application/services/SyncCoordinator';
-
   const groupRepo = new DexieGroupRepository();
 
   async function loadData() {
     currentIdentity = (await identityService.getCurrentIdentity()) ?? null;
     groups = await groupRepo.getAllGroups();
-
-    if (currentIdentity) {
-      syncCoordinator.subscribeUserEvents(currentIdentity.pubkey, async () => {
-        groups = await groupRepo.getAllGroups();
-      });
-    }
   }
 
   $effect(() => {
     void loadData();
-    return identityService.onIdentityChange((identity) => {
+
+    let unsubscribeSync: (() => void) | undefined;
+
+    identityService.getCurrentIdentity().then((identity) => {
+      if (identity) {
+        syncCoordinator
+          .subscribeUserEvents(identity.pubkey, () => {
+            void loadData();
+          })
+          .then((unsub) => {
+            unsubscribeSync = unsub;
+          });
+      }
+    });
+
+    const unsubscribeIdentity = identityService.onIdentityChange((identity) => {
       currentIdentity = identity;
       void loadData();
     });
+
+    return () => {
+      unsubscribeSync?.();
+      unsubscribeIdentity();
+    };
   });
 </script>
 

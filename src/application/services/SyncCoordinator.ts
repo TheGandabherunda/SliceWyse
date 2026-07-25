@@ -20,6 +20,12 @@ export class SyncCoordinator {
   private expenseRepo = new DexieExpenseRepository();
   private settlementRepo = new DexieSettlementRepository();
 
+  // Session & Deduplication State
+  private activeSessionPubkey: string | null = null;
+  private isSyncingHistory = false;
+  private processedEventIds = new Set<string>();
+  private updateListeners = new Set<() => void>();
+
   /**
    * Enqueues an application event pending construction/encryption and attempts immediate flush.
    */
@@ -60,7 +66,6 @@ export class SyncCoordinator {
 
   /**
    * Enqueues a fully constructed pre-signed Nostr event (e.g. NIP-59 Kind 1059 Gift Wrap).
-   * Pre-signed events are sent to relays UNCHANGED without re-signing or re-wrapping.
    */
   async enqueueSignedEvent(
     signedEvent: NostrEvent,
@@ -110,10 +115,8 @@ export class SyncCoordinator {
           let nostrEventToPublish: NostrEvent;
 
           if (item.signedNostrEventJson) {
-            // Pre-signed Nostr Event (e.g. Kind 1059 Gift Wrap) sent to relays UNCHANGED
             nostrEventToPublish = JSON.parse(item.signedNostrEventJson) as NostrEvent;
           } else {
-            // Application event pending construction
             const itemRecipients: string[] = item.recipientsJson
               ? JSON.parse(item.recipientsJson)
               : recipientPubkeys;
@@ -139,7 +142,6 @@ export class SyncCoordinator {
 
           console.log(`SYNC publish ${nostrEventToPublish.id}`);
 
-          // Publish event to relays and validate NIP-20 OK responses
           const acceptedRelays = await relayManager.publishEvent(nostrEventToPublish);
 
           if (acceptedRelays.length >= 2) {
@@ -174,90 +176,175 @@ export class SyncCoordinator {
   }
 
   /**
-   * 4-Stage Synchronization Pipeline:
-   * Stage 1 — Identity Recovery (NIP-59 Gift Wraps)
-   * Stage 2 — Group Reconstruction (Group Events)
-   * Stage 3 — Member Discovery (NIP-65 Relays)
-   * Stage 4 — Multi-Author History Sync
+   * Subscribes to user events with idempotent session management and in-flight historical sync guard.
    */
   async subscribeUserEvents(pubkeyHex: string, onSyncUpdate?: () => void): Promise<() => void> {
-    if (this.activeSubscriptionClose) {
-      this.activeSubscriptionClose();
+    if (onSyncUpdate) {
+      this.updateListeners.add(onSyncUpdate);
     }
 
-    console.log(`SYNC history started`);
+    const unsubscribeListener = () => {
+      if (onSyncUpdate) {
+        this.updateListeners.delete(onSyncUpdate);
+      }
+    };
+
+    // Idempotent Check: If session is already active for this identity, do NOT restart history sync
+    if (this.activeSessionPubkey === pubkeyHex) {
+      console.log(`SYNC session already active ${pubkeyHex}`);
+      return unsubscribeListener;
+    }
+
+    // Stop existing session if switching identity
+    if (this.activeSessionPubkey && this.activeSessionPubkey !== pubkeyHex) {
+      this.stopSession();
+    }
+
+    this.activeSessionPubkey = pubkeyHex;
+    console.log(`SYNC session start ${pubkeyHex}`);
+
+    // Execute 4-Stage History Sync ONCE under in-flight guard
+    await this.runHistoricalSync(pubkeyHex);
+
+    return unsubscribeListener;
+  }
+
+  /**
+   * Executes 4-Stage Historical Synchronization ONCE under in-flight guard.
+   */
+  private async runHistoricalSync(pubkeyHex: string): Promise<void> {
+    if (this.isSyncingHistory) return;
+    this.isSyncingHistory = true;
+
+    console.log(`SYNC history start ${pubkeyHex}`);
     const currentIdentity = await identityService.getCurrentIdentity();
 
-    // Stage 1: Retrieve NIP-59 Gift Wrap events addressed to current identity (#p: [pubkeyHex])
-    const giftWrapFilters = [{ kinds: [1059], '#p': [pubkeyHex], limit: 500 }];
-    const giftWrapEvents = await relayManager.queryEvents(giftWrapFilters as any);
+    try {
+      // Stage 1: Retrieve NIP-59 Gift Wrap events addressed to current identity (#p: [pubkeyHex])
+      const giftWrapFilters = [{ kinds: [1059], '#p': [pubkeyHex], limit: 500 }];
+      const giftWrapEvents = await relayManager.queryEvents(giftWrapFilters as any);
 
-    for (const gwEvent of giftWrapEvents) {
-      console.log(`SYNC giftwrap received ${gwEvent.id}`);
-      if (currentIdentity && currentIdentity.secretKey) {
-        const unwrapped = nip59GiftWrapService.decryptGiftWrap(gwEvent, currentIdentity.secretKey);
-        if (unwrapped) {
-          console.log(`SYNC giftwrap unwrapped ${gwEvent.id}`);
-          console.log(
-            `SYNC group key recovered ${unwrapped.envelope.groupId} ${unwrapped.envelope.keyVersion}`
+      for (const gwEvent of giftWrapEvents) {
+        if (this.processedEventIds.has(gwEvent.id)) {
+          console.log(`SYNC event duplicate ${gwEvent.id}`);
+          continue;
+        }
+        this.processedEventIds.add(gwEvent.id);
+
+        console.log(`SYNC giftwrap received ${gwEvent.id}`);
+        if (currentIdentity && currentIdentity.secretKey) {
+          const unwrapped = nip59GiftWrapService.decryptGiftWrap(
+            gwEvent,
+            currentIdentity.secretKey
           );
-          await this.storeGroupKey(unwrapped.envelope);
+          if (unwrapped) {
+            console.log(`SYNC giftwrap unwrapped ${gwEvent.id}`);
+            console.log(
+              `SYNC group key recovered ${unwrapped.envelope.groupId} ${unwrapped.envelope.keyVersion}`
+            );
+            await this.storeGroupKey(unwrapped.envelope);
+          }
         }
       }
-    }
 
-    // Stage 2: Discover all group IDs from stored group keys
-    const storedKeys = await db.group_keys.toArray();
-    const groupIds = Array.from(new Set(storedKeys.map((k) => k.groupId)));
+      // Stage 2: Discover all group IDs from stored group keys
+      const storedKeys = await db.group_keys.toArray();
+      const groupIds = Array.from(new Set(storedKeys.map((k) => k.groupId)));
 
-    // Stage 3: Query Group State events (Kind 1500) and fetch NIP-65 relay lists for members
-    if (groupIds.length > 0) {
-      const groupFilters = [{ kinds: [1500], '#d': groupIds, limit: 500 }];
-      const groupEvents = await relayManager.queryEvents(groupFilters as any);
-      for (const evt of groupEvents) {
+      // Stage 3: Query Group State events (Kind 1500) and fetch NIP-65 relay lists for members
+      if (groupIds.length > 0) {
+        const groupFilters = [{ kinds: [1500], '#d': groupIds, limit: 500 }];
+        const groupEvents = await relayManager.queryEvents(groupFilters as any);
+        for (const evt of groupEvents) {
+          await this.ingestEvent(evt);
+        }
+
+        const allMembers = await db.members.toArray();
+        const memberPubkeys = Array.from(new Set(allMembers.map((m) => m.pubkey)));
+        for (const memberPk of memberPubkeys) {
+          await relayManager.fetchAndMergeNip65Relays(memberPk);
+        }
+      }
+
+      // Stage 4: Query multi-author history across all member write relays and bootstrap relays
+      const dataFilters = [
+        { kinds: [1500, 1501, 1502, 1503], authors: [pubkeyHex], limit: 500 },
+        { kinds: [1500, 1501, 1502, 1503], '#p': [pubkeyHex], limit: 500 },
+      ];
+
+      if (groupIds.length > 0) {
+        dataFilters.push({ kinds: [1500, 1501, 1502, 1503], '#d': groupIds, limit: 500 } as any);
+      }
+
+      const dataEvents = await relayManager.queryEvents(dataFilters as any);
+      for (const evt of dataEvents) {
         await this.ingestEvent(evt);
       }
 
-      // Discover member pubkeys from saved groups and fetch NIP-65 relays
-      const allMembers = await db.members.toArray();
-      const memberPubkeys = Array.from(new Set(allMembers.map((m) => m.pubkey)));
-      for (const memberPk of memberPubkeys) {
-        await relayManager.fetchAndMergeNip65Relays(memberPk);
+      // Start Realtime Subscription after history sync completes
+      if (this.activeSubscriptionClose) {
+        this.activeSubscriptionClose();
+      }
+
+      const subId = `sub_${pubkeyHex.slice(0, 8)}`;
+      console.log(`SYNC subscription created ${subId}`);
+
+      const unsubscribe = relayManager.subscribe(dataFilters as any, async (event: NostrEvent) => {
+        await this.ingestEvent(event);
+        this.notifyListeners();
+      });
+
+      this.activeSubscriptionClose = () => {
+        console.log(`SYNC subscription closed ${subId}`);
+        unsubscribe();
+      };
+
+      console.log(`SYNC history complete ${pubkeyHex}`);
+      this.notifyListeners();
+    } finally {
+      this.isSyncingHistory = false;
+    }
+  }
+
+  /**
+   * Stops current active sync session and cleans up subscriptions/listeners.
+   */
+  stopSession(): void {
+    if (this.activeSessionPubkey) {
+      console.log(`SYNC session stop ${this.activeSessionPubkey}`);
+      this.activeSessionPubkey = null;
+    }
+    if (this.activeSubscriptionClose) {
+      this.activeSubscriptionClose();
+      this.activeSubscriptionClose = undefined;
+    }
+    this.updateListeners.clear();
+    this.processedEventIds.clear();
+  }
+
+  private notifyListeners(): void {
+    for (const listener of Array.from(this.updateListeners)) {
+      try {
+        listener();
+      } catch {
+        // Ignore listener exceptions
       }
     }
-
-    // Stage 4: Query multi-author history across all member write relays and bootstrap relays
-    const dataFilters = [
-      { kinds: [1500, 1501, 1502, 1503], authors: [pubkeyHex], limit: 500 },
-      { kinds: [1500, 1501, 1502, 1503], '#p': [pubkeyHex], limit: 500 },
-    ];
-
-    if (groupIds.length > 0) {
-      dataFilters.push({ kinds: [1500, 1501, 1502, 1503], '#d': groupIds, limit: 500 } as any);
-    }
-
-    const dataEvents = await relayManager.queryEvents(dataFilters as any);
-    for (const evt of dataEvents) {
-      await this.ingestEvent(evt);
-    }
-
-    if (onSyncUpdate) onSyncUpdate();
-
-    // Realtime subscription for incoming events
-    const unsubscribe = relayManager.subscribe(dataFilters as any, async (event: NostrEvent) => {
-      await this.ingestEvent(event);
-      if (onSyncUpdate) onSyncUpdate();
-    });
-
-    this.activeSubscriptionClose = unsubscribe;
-    return unsubscribe;
   }
 
   /**
    * Ingests, verifies signatures, decrypts AES-256-GCM, and persists an incoming Nostr event.
+   * Performs event-level deduplication BEFORE expensive cryptographic processing.
    */
   private async ingestEvent(event: NostrEvent): Promise<void> {
     try {
+      // Event-Level Deduplication before crypto processing
+      if (this.processedEventIds.has(event.id)) {
+        console.log(`SYNC event duplicate ${event.id}`);
+        return;
+      }
+      this.processedEventIds.add(event.id);
+
       const existing = await db.events.get(event.id);
       if (existing) return;
 
@@ -343,13 +430,21 @@ export class SyncCoordinator {
     }
   }
 
+  /**
+   * Idempotent storage of Group Keys.
+   * If the exact same (groupId, keyVersion, groupKeyHex) exists, returns without writing or triggering listeners.
+   */
   private async storeGroupKey(envelope: GroupKeyEnvelope): Promise<void> {
     const existing = await db.group_keys
       .where('[groupId+keyVersion]')
       .equals([envelope.groupId, envelope.keyVersion])
       .first();
 
-    if (!existing) {
+    if (existing) {
+      if (existing.groupKeyHex === envelope.groupKey) {
+        return; // Idempotent match - do not re-write or trigger updates
+      }
+    } else {
       await db.group_keys.add({
         groupId: envelope.groupId,
         keyVersion: envelope.keyVersion,
