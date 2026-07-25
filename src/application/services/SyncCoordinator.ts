@@ -251,9 +251,13 @@ export class SyncCoordinator {
       const storedKeys = await db.group_keys.toArray();
       const groupIds = Array.from(new Set(storedKeys.map((k) => k.groupId)));
 
-      // Stage 3: Query Group State events (Kind 1500) and fetch NIP-65 relay lists for members
+      // Stage 3: Query Group State events (Kind 1500-1503) via #d, #p, and authors filters
       if (groupIds.length > 0) {
-        const groupFilters = [{ kinds: [1500], '#d': groupIds, limit: 500 }];
+        const groupFilters = [
+          { kinds: [1500, 1501, 1502, 1503], '#d': groupIds, limit: 500 },
+          { kinds: [1500, 1501, 1502, 1503], '#p': [pubkeyHex], limit: 500 },
+          { kinds: [1500, 1501, 1502, 1503], authors: [pubkeyHex], limit: 500 },
+        ];
         const groupEvents = await relayManager.queryEvents(groupFilters as any);
         for (const evt of groupEvents) {
           await this.ingestEvent(evt);
