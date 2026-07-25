@@ -12,8 +12,9 @@ export class DexieSettlementRepository {
       amountCents: settlement.amount.amountCents,
       currency: settlement.amount.currency,
       date: settlement.date,
+      parentEventIdsJson: JSON.stringify([]),
       createdBy: settlement.createdBy,
-      syncStatus: 'PENDING',
+      syncStatus: 'QUEUED',
     };
 
     await db.settlements.put(record);

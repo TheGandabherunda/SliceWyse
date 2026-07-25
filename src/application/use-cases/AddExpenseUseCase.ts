@@ -2,7 +2,6 @@ import { Expense, type SplitType } from '../../domain/entities/Expense';
 import { Money } from '../../domain/value-objects/Money';
 import { identityService } from '../../infrastructure/identity/IdentityService';
 import { DexieExpenseRepository } from '../../infrastructure/repositories/DexieExpenseRepository';
-import { DexieGroupRepository } from '../../infrastructure/repositories/DexieGroupRepository';
 import { syncCoordinator } from '../services/SyncCoordinator';
 
 export interface AddExpenseInput {
@@ -14,23 +13,16 @@ export interface AddExpenseInput {
   participantPubkeys: string[];
   splitType: SplitType;
   exactSplits?: Record<string, number>; // pubkey -> amountCents if EXACT
+  parentEventIds?: string[];
 }
 
 export class AddExpenseUseCase {
-  constructor(
-    private expenseRepo = new DexieExpenseRepository(),
-    private groupRepo = new DexieGroupRepository()
-  ) {}
+  constructor(private expenseRepo = new DexieExpenseRepository()) {}
 
   async execute(input: AddExpenseInput): Promise<Expense> {
     const currentIdentity = await identityService.getCurrentIdentity();
     if (!currentIdentity) {
       throw new Error('User identity required to create expense');
-    }
-
-    const group = await this.groupRepo.getGroupById(input.groupId);
-    if (!group) {
-      throw new Error(`Group with ID "${input.groupId}" not found`);
     }
 
     const totalMoney = new Money(input.amountCents, input.currency);
@@ -68,9 +60,8 @@ export class AddExpenseUseCase {
 
     await this.expenseRepo.saveExpense(expense);
 
-    // Enqueue encrypted expense event for Nostr relay sync
+    // Enqueue Immutable Expense Event (Kind 1501)
     const expensePayload = {
-      v: expense.version,
       type: 'EXPENSE_CREATED',
       groupId: expense.groupId,
       expenseId: expense.id,
@@ -81,15 +72,16 @@ export class AddExpenseUseCase {
       splits: expense.splits.map((s) => ({ pubkey: s.pubkey, amountCents: s.amount.amountCents })),
       splitType: expense.splitType,
       date: expense.date,
-      previousVersionId: expense.previousVersionId,
+      keyVersion: 1,
+      parentEventIds: input.parentEventIds ?? [],
       createdBy: expense.createdBy,
     };
 
     await syncCoordinator.enqueueEvent(
       expense.groupId,
-      30079,
-      JSON.stringify(expensePayload),
-      group.members.map((member) => member.pubkey.value)
+      1501,
+      expensePayload,
+      input.participantPubkeys
     );
 
     return expense;

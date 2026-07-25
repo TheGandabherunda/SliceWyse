@@ -20,10 +20,8 @@ declare global {
 }
 
 export class IdentityService {
-  private identityListeners = new Set<(identity: IdentityRecord) => void>();
-
   /**
-   * Generates a new Nostr keypair locally, stores it in IndexedDB, and sets it as the active identity.
+   * Generates a new Nostr keypair locally, stores it in IndexedDB, and sets it as active identity.
    */
   async generateIdentity(displayName: string): Promise<IdentityRecord> {
     if (!displayName || displayName.trim().length === 0) {
@@ -34,14 +32,12 @@ export class IdentityService {
     const secretKeyHex = bytesToHex(secretKeyBytes);
     const pubkeyHex = getPublicKey(secretKeyBytes);
 
-    // Deactivate previous active identities
     await db.identities.where({ isCurrent: 1 }).modify({ isCurrent: 0 });
 
     const identity: IdentityRecord = {
       pubkey: pubkeyHex,
       secretKey: secretKeyHex,
       displayName: displayName.trim(),
-      hasCustomDisplayName: true,
       isExtension: false,
       isCurrent: 1,
       createdAt: Date.now(),
@@ -52,9 +48,9 @@ export class IdentityService {
   }
 
   /**
-   * Imports identity via nsec or 64-char hex secret key.
+   * Imports identity via nsec or 64-char hex secret key. Awaits profile hydration.
    */
-  async importSecretKey(nsecOrHex: string, displayName: string): Promise<IdentityRecord> {
+  async importSecretKey(nsecOrHex: string, displayNameInput: string = ''): Promise<IdentityRecord> {
     let secretKeyHex = '';
     const trimmed = nsecOrHex.trim();
 
@@ -75,13 +71,22 @@ export class IdentityService {
 
     await db.identities.where({ isCurrent: 1 }).modify({ isCurrent: 0 });
 
-    const fallbackName = displayName.trim() || `${nip19.npubEncode(pubkeyHex).slice(0, 10)}...`;
+    let finalName = displayNameInput.trim();
+
+    // Fast-timeout (2.5s) profile hydration if no name provided
+    if (!finalName) {
+      const fetchedName = await this.hydrateProfile(pubkeyHex, 2500);
+      if (fetchedName) {
+        finalName = fetchedName;
+      } else {
+        finalName = `${nip19.npubEncode(pubkeyHex).slice(0, 10)}...`;
+      }
+    }
 
     const identity: IdentityRecord = {
       pubkey: pubkeyHex,
       secretKey: secretKeyHex,
-      displayName: fallbackName,
-      hasCustomDisplayName: Boolean(displayName.trim()),
+      displayName: finalName,
       isExtension: false,
       isCurrent: 1,
       createdAt: Date.now(),
@@ -89,18 +94,16 @@ export class IdentityService {
 
     await db.identities.put(identity);
 
-    // Background fetch Nostr Kind 0 profile metadata from relays if no custom name specified
-    if (!displayName.trim()) {
-      void this.refreshProfileDisplayName(pubkeyHex);
-    }
+    // Merge user NIP-65 relays
+    relayManager.fetchAndMergeNip65Relays(pubkeyHex);
 
     return identity;
   }
 
   /**
-   * Connects to NIP-07 browser extension (e.g. Alby, nos2x).
+   * Connects to NIP-07 browser extension (e.g. Alby, nos2x). Awaits profile hydration.
    */
-  async connectExtension(displayName: string = ''): Promise<IdentityRecord> {
+  async connectExtension(displayNameInput: string = ''): Promise<IdentityRecord> {
     if (typeof window === 'undefined' || !window.nostr) {
       throw new Error('NIP-07 extension not detected in browser');
     }
@@ -112,12 +115,20 @@ export class IdentityService {
 
     await db.identities.where({ isCurrent: 1 }).modify({ isCurrent: 0 });
 
-    const fallbackName = displayName.trim() || `${nip19.npubEncode(pubkeyHex).slice(0, 10)}...`;
+    let finalName = displayNameInput.trim();
+
+    if (!finalName) {
+      const fetchedName = await this.hydrateProfile(pubkeyHex, 2500);
+      if (fetchedName) {
+        finalName = fetchedName;
+      } else {
+        finalName = `${nip19.npubEncode(pubkeyHex).slice(0, 10)}...`;
+      }
+    }
 
     const identity: IdentityRecord = {
       pubkey: pubkeyHex,
-      displayName: fallbackName,
-      hasCustomDisplayName: Boolean(displayName.trim()),
+      displayName: finalName,
       isExtension: true,
       isCurrent: 1,
       createdAt: Date.now(),
@@ -125,53 +136,35 @@ export class IdentityService {
 
     await db.identities.put(identity);
 
-    if (!displayName.trim()) {
-      void this.refreshProfileDisplayName(pubkeyHex);
-    }
+    relayManager.fetchAndMergeNip65Relays(pubkeyHex);
 
     return identity;
   }
 
   /**
-   * Fetches NIP-01 Kind 0 profile metadata from Nostr relays.
+   * Hydrates NIP-01 Kind 0 profile metadata from metadata relays.
    */
-  async fetchProfileMetadata(pubkeyHex: string): Promise<string | null> {
-    return new Promise((resolve) => {
-      let resolved = false;
-      let subClose: (() => void) | null = null;
+  async hydrateProfile(pubkeyHex: string, timeoutMs: number = 3000): Promise<string | null> {
+    try {
+      const metadataRelays = relayManager.getMetadataRelays();
+      const events = await relayManager.queryEvents(
+        [{ kinds: [0], authors: [pubkeyHex], limit: 1 }],
+        metadataRelays
+      );
 
-      const timeout = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          if (subClose) subClose();
-          resolve(null);
-        }
-      }, 8000);
+      if (events.length === 0) return null;
 
-      try {
-        subClose = relayManager.subscribe(
-          [{ kinds: [0], authors: [pubkeyHex], limit: 1 }],
-          (event) => {
-            if (resolved) return;
-            try {
-              const profile = JSON.parse(event.content);
-              const name =
-                profile.display_name || profile.name || profile.displayName || profile.username;
-              if (name && typeof name === 'string' && name.trim()) {
-                resolved = true;
-                clearTimeout(timeout);
-                if (subClose) subClose();
-                resolve(name.trim());
-              }
-            } catch {
-              // ignore invalid JSON
-            }
-          }
-        );
-      } catch {
-        resolve(null);
+      const profile = JSON.parse(events[0].content);
+      const resolvedName =
+        profile.display_name || profile.name || profile.username || profile.displayName;
+
+      if (resolvedName && typeof resolvedName === 'string' && resolvedName.trim()) {
+        return resolvedName.trim();
       }
-    });
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -209,40 +202,7 @@ export class IdentityService {
    * Retrieves current active identity.
    */
   async getCurrentIdentity(): Promise<IdentityRecord | undefined> {
-    const current = await db.identities.where({ isCurrent: 1 }).first();
-    if (current && !this.hasCustomDisplayName(current) && this.isGenericName(current.displayName)) {
-      void this.refreshProfileDisplayName(current.pubkey);
-    }
-    return current;
-  }
-
-  /**
-   * Refreshes a fallback name from Kind 0 metadata without ever replacing a user-supplied name.
-   */
-  private async refreshProfileDisplayName(pubkey: string): Promise<void> {
-    const profileName = await this.fetchProfileMetadata(pubkey);
-    if (!profileName) return;
-
-    const identity = await db.identities.get(pubkey);
-    if (!identity || this.hasCustomDisplayName(identity)) return;
-
-    await this.setDisplayNameForPubkey(pubkey, profileName, false);
-  }
-
-  private hasCustomDisplayName(identity: IdentityRecord): boolean {
-    // Older records did not track this flag. Preserve any non-fallback name they already contain.
-    return identity.hasCustomDisplayName ?? !this.isGenericName(identity.displayName);
-  }
-
-  private isGenericName(name?: string): boolean {
-    if (!name || !name.trim()) return true;
-    const trimmed = name.trim().toLowerCase();
-    return (
-      trimmed === 'nostr user' ||
-      trimmed === 'nostr extension user' ||
-      trimmed === 'user' ||
-      trimmed.startsWith('npub1')
-    );
+    return await db.identities.where({ isCurrent: 1 }).first();
   }
 
   /**
@@ -254,45 +214,41 @@ export class IdentityService {
       throw new Error('Display name cannot be empty');
     }
 
-    const current = await db.identities.where({ isCurrent: 1 }).first();
+    const current = await this.getCurrentIdentity();
     if (!current) return;
 
-    await this.setDisplayNameForPubkey(current.pubkey, trimmed, true);
-  }
+    await db.identities.update(current.pubkey, { displayName: trimmed });
 
-  /** Lets the UI refresh when an asynchronous Kind 0 lookup changes the active identity. */
-  onIdentityChange(listener: (identity: IdentityRecord) => void): () => void {
-    this.identityListeners.add(listener);
-    return () => this.identityListeners.delete(listener);
-  }
-
-  private async setDisplayNameForPubkey(
-    pubkey: string,
-    displayName: string,
-    hasCustomDisplayName: boolean
-  ): Promise<void> {
-    const identity = await db.identities.get(pubkey);
-    if (!identity) return;
-
-    await db.identities.update(pubkey, { displayName, hasCustomDisplayName });
-
-    // Self-heal & update all member records across all groups in IndexedDB
     const allMembers = await db.members.toArray();
     for (const member of allMembers) {
-      if (member.id !== undefined && member.pubkey.toLowerCase() === pubkey.toLowerCase()) {
-        await db.members.update(member.id, { displayName });
+      if (member.id !== undefined && member.pubkey.toLowerCase() === current.pubkey.toLowerCase()) {
+        await db.members.update(member.id, { displayName: trimmed });
       }
     }
 
-    const updated = await db.identities.get(pubkey);
-    if (updated?.isCurrent) {
-      for (const listener of this.identityListeners) listener(updated);
+    const updated = await this.getCurrentIdentity();
+    this.notifyIdentityChange(updated ?? null);
+  }
+
+  private identityListeners: Array<(identity: IdentityRecord | null) => void> = [];
+
+  onIdentityChange(callback: (identity: IdentityRecord | null) => void): () => void {
+    this.identityListeners.push(callback);
+    return () => {
+      this.identityListeners = this.identityListeners.filter((cb) => cb !== callback);
+    };
+  }
+
+  private notifyIdentityChange(identity: IdentityRecord | null): void {
+    for (const listener of this.identityListeners) {
+      try {
+        listener(identity);
+      } catch {
+        // Ignore listener exceptions
+      }
     }
   }
 
-  /**
-   * Checks if NIP-07 extension is available in the environment.
-   */
   isExtensionAvailable(): boolean {
     return typeof window !== 'undefined' && Boolean(window.nostr);
   }

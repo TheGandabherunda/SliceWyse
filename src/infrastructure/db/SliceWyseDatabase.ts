@@ -4,8 +4,6 @@ export interface IdentityRecord {
   pubkey: string; // 64-char hex
   secretKey?: string; // Hex secret key if locally generated/imported
   displayName: string;
-  /** True when the name was explicitly chosen in SliceWyse rather than inferred from Nostr metadata. */
-  hasCustomDisplayName?: boolean;
   isExtension: boolean; // true if NIP-07 extension
   isCurrent: number; // 1 for true, 0 for false (IndexedDB key constraint)
   createdAt: number;
@@ -37,11 +35,12 @@ export interface ExpenseRecord {
   splitsJson: string; // JSON array of {pubkey, amountCents}
   splitType: 'EQUAL' | 'EXACT' | 'PERCENTAGE';
   date: number;
-  version: number;
-  previousVersionId?: string | null;
+  revision: number;
+  parentEventIdsJson: string; // JSON array of parent event IDs (DAG)
   isDeleted: boolean;
+  hasConflict?: boolean;
   createdBy: string;
-  syncStatus: 'PENDING' | 'SYNCED' | 'FAILED';
+  syncStatus: 'QUEUED' | 'PUBLISHING' | 'ACCEPTED_BY_ONE_RELAY' | 'REPLICATED' | 'RETRY_REQUIRED';
 }
 
 export interface SettlementRecord {
@@ -52,8 +51,17 @@ export interface SettlementRecord {
   amountCents: number;
   currency: string;
   date: number;
+  parentEventIdsJson: string;
   createdBy: string;
-  syncStatus: 'PENDING' | 'SYNCED' | 'FAILED';
+  syncStatus: 'QUEUED' | 'PUBLISHING' | 'ACCEPTED_BY_ONE_RELAY' | 'REPLICATED' | 'RETRY_REQUIRED';
+}
+
+export interface GroupKeyRecord {
+  id?: number;
+  groupId: string;
+  keyVersion: number;
+  groupKeyHex: string; // 64-char hex representation of 32-byte AES key
+  createdAt: number;
 }
 
 export interface SyncQueueRecord {
@@ -63,6 +71,8 @@ export interface SyncQueueRecord {
   eventKind: number;
   payloadJson: string;
   recipientsJson?: string;
+  status: 'QUEUED' | 'PUBLISHING' | 'ACCEPTED_BY_ONE_RELAY' | 'REPLICATED' | 'RETRY_REQUIRED';
+  acceptedRelaysJson?: string;
   attempts: number;
   lastAttemptAt: number;
 }
@@ -73,6 +83,7 @@ export interface EventRecord {
   pubkey: string;
   createdAt: number;
   groupId: string;
+  parentEventIdsJson: string;
   rawEvent: string;
 }
 
@@ -82,19 +93,21 @@ export class SliceWyseDatabase extends Dexie {
   members!: EntityTable<MemberRecord, 'id'>;
   expenses!: EntityTable<ExpenseRecord, 'id'>;
   settlements!: EntityTable<SettlementRecord, 'id'>;
+  group_keys!: EntityTable<GroupKeyRecord, 'id'>;
   events!: EntityTable<EventRecord, 'id'>;
   sync_queue!: EntityTable<SyncQueueRecord, 'id'>;
 
   constructor() {
     super('SliceWyseDB');
-    this.version(1).stores({
+    this.version(2).stores({
       identities: 'pubkey, isCurrent',
       groups: 'id, updatedAt',
       members: '++id, groupId, pubkey, [groupId+pubkey]',
       expenses: 'id, groupId, date, isDeleted, syncStatus',
       settlements: 'id, groupId, date, syncStatus',
+      group_keys: '++id, groupId, keyVersion, [groupId+keyVersion]',
       events: 'id, kind, pubkey, groupId',
-      sync_queue: '++id, eventId, groupId, attempts',
+      sync_queue: '++id, eventId, groupId, status, attempts',
     });
   }
 }

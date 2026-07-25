@@ -18,11 +18,13 @@ export class DexieExpenseRepository {
       ),
       splitType: expense.splitType,
       date: expense.date,
-      version: expense.version,
-      previousVersionId: expense.previousVersionId,
+      revision: expense.version,
+      parentEventIdsJson: JSON.stringify(
+        expense.previousVersionId ? [expense.previousVersionId] : []
+      ),
       isDeleted: expense.isDeleted,
       createdBy: expense.createdBy,
-      syncStatus: 'PENDING',
+      syncStatus: 'QUEUED',
     };
 
     await db.expenses.put(record);
@@ -44,6 +46,10 @@ export class DexieExpenseRepository {
         amountCents: number;
       }>;
 
+      const parentIds: string[] = record.parentEventIdsJson
+        ? JSON.parse(record.parentEventIdsJson)
+        : [];
+
       return new Expense({
         id: record.id,
         groupId: record.groupId,
@@ -59,8 +65,8 @@ export class DexieExpenseRepository {
         })),
         splitType: record.splitType,
         date: record.date,
-        version: record.version,
-        previousVersionId: record.previousVersionId,
+        version: record.revision,
+        previousVersionId: parentIds[0] ?? null,
         isDeleted: record.isDeleted,
         createdBy: record.createdBy,
       });

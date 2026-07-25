@@ -5,103 +5,61 @@ import { Settlement } from '../entities/Settlement';
 import { Money } from '../value-objects/Money';
 import { Pubkey } from '../value-objects/Pubkey';
 
-export interface DecryptedGroupPayload {
-  groupId: string;
-  name: string;
-  currency: string;
-  members: Array<{ pubkey: string; displayName: string; joinedAt: number }>;
-  createdAt: number;
-}
-
-export interface DecryptedExpensePayload {
-  v: number;
-  type: 'EXPENSE_CREATED';
-  groupId: string;
-  expenseId: string;
-  title: string;
-  amountCents: number;
-  currency: string;
-  paidBy: Array<{ pubkey: string; amountCents: number }>;
-  splits: Array<{ pubkey: string; amountCents: number }>;
-  splitType: SplitType;
-  date: number;
-  previousVersionId?: string | null;
-  createdBy: string;
-}
-
-export interface DecryptedSettlementPayload {
-  v: number;
-  type: 'SETTLEMENT_CREATED';
-  groupId: string;
-  settlementId: string;
-  payer: string;
-  payee: string;
-  amountCents: number;
-  currency: string;
-  date: number;
-  createdBy: string;
-}
-
 export class EventReducer {
-  /**
-   * Reconstructs Group entity from decrypted Kind 30078 event payload.
-   */
-  static reduceGroup(payload: DecryptedGroupPayload): Group {
-    const members = payload.members.map(
-      (m) =>
+  static reduceGroup(payload: any): Group {
+    const members = (payload.members ?? []).map(
+      (m: any) =>
         new Member({
-          pubkey: new Pubkey(m.pubkey),
-          displayName: m.displayName,
-          joinedAt: m.joinedAt,
+          pubkey: new Pubkey(typeof m === 'string' ? m : m.pubkey),
+          displayName: typeof m === 'string' ? 'Member' : m.displayName,
+          joinedAt: m.joinedAt ?? Date.now(),
         })
     );
 
     return new Group({
       id: payload.groupId,
       name: payload.name,
-      currency: payload.currency,
+      currency: payload.currency ?? 'USD',
       members,
-      createdAt: payload.createdAt,
-      updatedAt: payload.createdAt,
+      createdAt: payload.createdAt ?? Date.now(),
+      updatedAt: payload.createdAt ?? Date.now(),
     });
   }
 
-  /**
-   * Reconstructs Expense entity from decrypted Kind 30079 event payload.
-   */
-  static reduceExpense(payload: DecryptedExpensePayload): Expense {
+  static reduceExpense(payload: any): Expense {
+    const currency = payload.currency ?? 'USD';
+
     return new Expense({
       id: payload.expenseId,
       groupId: payload.groupId,
       title: payload.title,
-      amount: new Money(payload.amountCents, payload.currency),
-      paidBy: payload.paidBy.map((p) => ({
+      amount: new Money(payload.amountCents, currency),
+      paidBy: (payload.paidBy ?? []).map((p: any) => ({
         pubkey: p.pubkey,
-        amount: new Money(p.amountCents, payload.currency),
+        amount: new Money(p.amountCents, currency),
       })),
-      splits: payload.splits.map((s) => ({
+      splits: (payload.splits ?? []).map((s: any) => ({
         pubkey: s.pubkey,
-        amount: new Money(s.amountCents, payload.currency),
+        amount: new Money(s.amountCents, currency),
       })),
-      splitType: payload.splitType,
-      date: payload.date,
-      version: payload.v,
-      previousVersionId: payload.previousVersionId,
+      splitType: payload.splitType as SplitType,
+      date: payload.date ?? Date.now(),
+      version: payload.revision ?? 1,
+      previousVersionId: payload.parentEventIds?.[0] ?? null,
       createdBy: payload.createdBy,
     });
   }
 
-  /**
-   * Reconstructs Settlement entity from decrypted Kind 30080 event payload.
-   */
-  static reduceSettlement(payload: DecryptedSettlementPayload): Settlement {
+  static reduceSettlement(payload: any): Settlement {
+    const currency = payload.currency ?? 'USD';
+
     return new Settlement({
       id: payload.settlementId,
       groupId: payload.groupId,
       payer: payload.payer,
       payee: payload.payee,
-      amount: new Money(payload.amountCents, payload.currency),
-      date: payload.date,
+      amount: new Money(payload.amountCents, currency),
+      date: payload.date ?? Date.now(),
       createdBy: payload.createdBy,
     });
   }
