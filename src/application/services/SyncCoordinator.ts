@@ -13,6 +13,13 @@ import { DexieExpenseRepository } from '../../infrastructure/repositories/DexieE
 import { DexieSettlementRepository } from '../../infrastructure/repositories/DexieSettlementRepository';
 import { EventReducer } from '../../domain/services/EventReducer';
 
+export type RecoveryState =
+  | 'NOT_INITIALIZED'
+  | 'RECOVERING_IDENTITY'
+  | 'RECOVERING_GROUP_KEYS'
+  | 'RECOVERING_EVENTS'
+  | 'READY';
+
 export class SyncCoordinator {
   private isProcessingQueue = false;
   private activeSubscriptionClose?: () => void;
@@ -23,8 +30,22 @@ export class SyncCoordinator {
   // Session & Deduplication State
   private activeSessionPubkey: string | null = null;
   private isSyncingHistory = false;
+  private recoveryState: RecoveryState = 'NOT_INITIALIZED';
   private processedEventIds = new Set<string>();
   private updateListeners = new Set<() => void>();
+
+  getRecoveryState(): RecoveryState {
+    return this.recoveryState;
+  }
+
+  isHistorySyncing(): boolean {
+    return this.isSyncingHistory;
+  }
+
+  private setRecoveryState(state: RecoveryState): void {
+    this.recoveryState = state;
+    this.notifyListeners();
+  }
 
   /**
    * Enqueues an application event pending construction/encryption and attempts immediate flush.
@@ -230,6 +251,7 @@ export class SyncCoordinator {
 
     try {
       // Stage 1: Retrieve NIP-59 Gift Wrap events addressed to current identity (#p: [pubkeyHex])
+      this.setRecoveryState('RECOVERING_IDENTITY');
       const giftWrapFilters = [{ kinds: [1059], '#p': [pubkeyHex], limit: 500 }];
       const giftWrapEvents = await relayManager.queryEvents(giftWrapFilters as any);
       console.log(
@@ -241,6 +263,7 @@ export class SyncCoordinator {
       }
 
       // Stage 2: Discover all group IDs from stored group keys
+      this.setRecoveryState('RECOVERING_GROUP_KEYS');
       const storedKeys = await db.group_keys.toArray();
       const groupIds = Array.from(new Set(storedKeys.map((k) => k.groupId)));
 
@@ -264,6 +287,7 @@ export class SyncCoordinator {
       }
 
       // Stage 4: Query multi-author history across all member write relays and bootstrap relays
+      this.setRecoveryState('RECOVERING_EVENTS');
       const dataFilters = [
         { kinds: [1500, 1501, 1502, 1503], authors: [pubkeyHex], limit: 500 },
         { kinds: [1500, 1501, 1502, 1503], '#p': [pubkeyHex], limit: 500 },
@@ -297,9 +321,12 @@ export class SyncCoordinator {
       };
 
       console.log(`SYNC history complete ${pubkeyHex}`);
-      this.notifyListeners();
+      this.setRecoveryState('READY');
     } finally {
       this.isSyncingHistory = false;
+      if (this.recoveryState !== 'READY') {
+        this.setRecoveryState('READY');
+      }
     }
   }
 
@@ -317,6 +344,7 @@ export class SyncCoordinator {
     }
     this.updateListeners.clear();
     this.processedEventIds.clear();
+    this.setRecoveryState('NOT_INITIALIZED');
   }
 
   private notifyListeners(): void {

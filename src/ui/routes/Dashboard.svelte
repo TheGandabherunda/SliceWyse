@@ -6,8 +6,11 @@
   import EditProfileModal from '../components/EditProfileModal.svelte';
   import SyncStatusBadge from '../components/SyncStatusBadge.svelte';
   import CreateGroupModal from '../components/CreateGroupModal.svelte';
-  import { Plus, Users, Sparkles, UserCheck, Edit2 } from 'lucide-svelte';
-  import { syncCoordinator } from '../../application/services/SyncCoordinator';
+  import { Plus, Users, Sparkles, UserCheck, Edit2, RefreshCw } from 'lucide-svelte';
+  import {
+    syncCoordinator,
+    type RecoveryState,
+  } from '../../application/services/SyncCoordinator';
 
   interface Props {
     onSelectGroup: (groupId: string) => void;
@@ -17,6 +20,7 @@
 
   let groups = $state<Group[]>([]);
   let currentIdentity = $state<IdentityRecord | null>(null);
+  let recoveryState = $state<RecoveryState>(syncCoordinator.getRecoveryState());
   let isCreateModalOpen = $state(false);
   let isEditProfileOpen = $state(false);
 
@@ -25,6 +29,7 @@
   async function loadData() {
     currentIdentity = (await identityService.getCurrentIdentity()) ?? null;
     groups = await groupRepo.getAllGroups();
+    recoveryState = syncCoordinator.getRecoveryState();
   }
 
   $effect(() => {
@@ -88,7 +93,25 @@
       </button>
     </div>
 
-    {#if groups.length === 0}
+    {#if recoveryState !== 'READY' && groups.length === 0}
+      <div class="glass-card recovery-loading">
+        <div class="spinner-container">
+          <RefreshCw size={36} class="spinning brand-spinner" />
+        </div>
+        <h3>Recovering your data...</h3>
+        <p class="status-subtitle">
+          {#if recoveryState === 'RECOVERING_IDENTITY'}
+            ⏳ Fetching profile & key envelopes...
+          {:else if recoveryState === 'RECOVERING_GROUP_KEYS'}
+            ⏳ Restoring group encryption keys...
+          {:else if recoveryState === 'RECOVERING_EVENTS'}
+            ⏳ Reconstructing group state & expenses...
+          {:else}
+            ⏳ Synchronizing with Nostr relays...
+          {/if}
+        </p>
+      </div>
+    {:else if groups.length === 0}
       <div class="glass-card empty-groups">
         <Users size={48} class="empty-icon" />
         <h3>No groups yet</h3>
@@ -206,6 +229,31 @@
       font-size: 1.5rem;
       font-weight: 600;
     }
+  }
+
+  .recovery-loading {
+    text-align: center;
+    padding: 4rem 2rem;
+    color: var(--text-secondary);
+
+    h3 {
+      font-size: 1.25rem;
+      color: var(--text-primary);
+      margin-bottom: 0.5rem;
+    }
+  }
+
+  .spinner-container {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 1.25rem;
+    color: var(--accent-primary);
+  }
+
+  .status-subtitle {
+    font-size: 0.95rem;
+    color: var(--text-secondary);
+    margin-top: 0.25rem;
   }
 
   .empty-groups {

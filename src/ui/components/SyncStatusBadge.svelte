@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Wifi, WifiOff, RefreshCw } from 'lucide-svelte';
+  import { syncCoordinator } from '../../application/services/SyncCoordinator';
+  import { identityService } from '../../infrastructure/identity/IdentityService';
 
   let isOnline = $state(navigator.onLine);
-  let isSyncing = $state(false);
+  let isSyncing = $state(syncCoordinator.isHistorySyncing());
 
   function updateOnlineStatus() {
     isOnline = navigator.onLine;
@@ -13,9 +15,24 @@
     window.addEventListener('online', updateOnlineStatus);
     window.addEventListener('offline', updateOnlineStatus);
 
+    let unsubscribeSync: (() => void) | undefined;
+
+    identityService.getCurrentIdentity().then((identity) => {
+      if (identity) {
+        syncCoordinator
+          .subscribeUserEvents(identity.pubkey, () => {
+            isSyncing = syncCoordinator.isHistorySyncing();
+          })
+          .then((unsub) => {
+            unsubscribeSync = unsub;
+          });
+      }
+    });
+
     return () => {
       window.removeEventListener('online', updateOnlineStatus);
       window.removeEventListener('offline', updateOnlineStatus);
+      unsubscribeSync?.();
     };
   });
 </script>
