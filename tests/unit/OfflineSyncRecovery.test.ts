@@ -144,4 +144,74 @@ describe('Milestone 6: Offline Sync Recovery Requests (Kind 1505)', () => {
     const queueItems = await db.sync_queue.toArray();
     expect(queueItems).toHaveLength(0);
   });
+
+  it('handleSyncRequest authorizes historical sync for joining user with valid pending JOIN_REQUEST (Kind 1504)', async () => {
+    vi.spyOn(syncCoordinator, 'processSyncQueue').mockResolvedValue(undefined);
+    const spyEnqueue = vi.spyOn(syncCoordinator, 'enqueueSignedEvent');
+
+    const groupId = 'grp_sync_400';
+
+    const group = new Group({
+      id: groupId,
+      name: 'Pending Join Group',
+      currency: 'USD',
+      members: [
+        new Member({ pubkey: new Pubkey(alicePubkey), displayName: 'Alice', joinedAt: 1000 }),
+      ],
+      createdAt: 1000,
+      updatedAt: 1000,
+    });
+    await groupRepo.saveGroup(group);
+
+    await syncCoordinator.rotateGroupKey(groupId, [alicePubkey]);
+
+    // Store a pending JOIN_REQUEST (Kind 1504) from Bob in db.events
+    const joinEvent = {
+      id: 'evt_join_1504_bob',
+      kind: 1504,
+      pubkey: bobPubkey,
+      created_at: 1010,
+      tags: [
+        ['d', groupId],
+        ['k', '1'],
+      ],
+      content: JSON.stringify({
+        type: 'JOIN_REQUEST',
+        groupId,
+        joiningMember: {
+          pubkey: bobPubkey,
+          displayName: 'Bob',
+          joinedAt: 1010,
+        },
+        invitationKeyVersion: 1,
+      }),
+      sig: '00'.repeat(64),
+    };
+
+    await db.events.put({
+      id: joinEvent.id,
+      kind: 1504,
+      pubkey: bobPubkey,
+      createdAt: 1010,
+      groupId,
+      parentEventIdsJson: '[]',
+      rawEvent: JSON.stringify(joinEvent),
+      keyVersion: 1,
+    });
+
+    // Bob (not yet in group.members) requests sync with sinceKeyVersion: 1
+    await syncCoordinator.handleSyncRequest(bobPubkey, {
+      type: 'SYNC_REQUEST',
+      groupId,
+      sinceKeyVersion: 1,
+      knownEventIds: [],
+      requestedAt: Date.now(),
+    });
+
+    // Verify Bob was authorized and added via FulfillJoinRequestUseCase
+    const updatedGroup = await groupRepo.getGroupById(groupId);
+    expect(updatedGroup?.hasMember(bobPubkey)).toBe(true);
+
+    expect(spyEnqueue).toHaveBeenCalled();
+  });
 });

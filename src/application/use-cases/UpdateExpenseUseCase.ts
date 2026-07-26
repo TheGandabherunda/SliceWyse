@@ -99,11 +99,20 @@ export class UpdateExpenseUseCase {
       parentEventIds: [input.parentEventId],
     };
 
-    await syncCoordinator.enqueueEvent(input.groupId, 1501, payload);
+    // 1. Submit append-only EXPENSE_UPDATED event via Unified Pipeline (ADR-005)
+    await syncCoordinator.submitLocalEvent({
+      groupId: input.groupId,
+      eventKind: 1501,
+      unencryptedPayload: payload,
+      parentEventIds: [input.parentEventId],
+    });
 
-    // 2. Project state into local Dexie repository
-    await this.expenseRepo.saveExpense(updatedExpense);
+    // 2. Return canonical updated Expense projection populated by EventReducer
+    const updated = await this.expenseRepo.getExpenseById(input.expenseId);
+    if (!updated) {
+      throw new Error(`Failed to retrieve updated expense projection for ${input.expenseId}`);
+    }
 
-    return updatedExpense;
+    return updated;
   }
 }

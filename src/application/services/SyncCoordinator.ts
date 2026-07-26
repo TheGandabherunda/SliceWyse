@@ -29,6 +29,15 @@ export type RecoveryState =
   | 'RECOVERING_EVENTS'
   | 'READY';
 
+export interface SubmitLocalEventOptions<T = any> {
+  groupId: string;
+  eventKind: number;
+  unencryptedPayload: T;
+  parentEventIds: string[];
+  recipientPubkeys?: string[];
+  keyVersion?: number;
+}
+
 export class SyncCoordinator {
   private isProcessingQueue = false;
   private activeSubscriptionClose?: () => void;
@@ -64,6 +73,210 @@ export class SyncCoordinator {
   private setRecoveryState(state: RecoveryState): void {
     this.recoveryState = state;
     this.notifyListeners();
+  }
+
+  /**
+   * Category A: Domain State-Mutating Local Event Submission API (ADR-005).
+   * Performs prerequisite checks, encrypts payload, signs event, validates via canonical EventValidationPipeline,
+   * persists to db.events, reduces to domain projections, and queues for relay transmission in a single atomic transaction.
+   */
+  async submitLocalEvent<T = any>(options: SubmitLocalEventOptions<T>): Promise<ValidatedEvent> {
+    const {
+      groupId,
+      eventKind,
+      unencryptedPayload,
+      parentEventIds,
+      recipientPubkeys = [],
+    } = options;
+
+    // 1. PREREQUISITE CHECKS (Non-validation checks)
+    const currentIdentity = await identityService.getCurrentIdentity();
+    if (!currentIdentity) {
+      throw new Error('User identity required to submit local event');
+    }
+
+    const requestedKeyVersion = (unencryptedPayload as any)?.keyVersion ?? options.keyVersion;
+    const activeKey = requestedKeyVersion
+      ? await this.getGroupKey(groupId, requestedKeyVersion)
+      : await this.getLatestGroupKey(groupId);
+
+    const usedKeyVersion = activeKey?.keyVersion ?? requestedKeyVersion ?? 1;
+
+    let payloadToSend =
+      typeof unencryptedPayload === 'string'
+        ? unencryptedPayload
+        : JSON.stringify(unencryptedPayload);
+
+    // Encrypt data payloads (Kinds 1500, 1501, 1502, 1503) using AES-256-GCM
+    if ([1500, 1501, 1502, 1503].includes(eventKind)) {
+      if (!activeKey) {
+        throw new Error(
+          `Group key required to encrypt event kind ${eventKind} for group ${groupId}`
+        );
+      }
+      payloadToSend = await aesGcmCryptoService.encrypt(payloadToSend, activeKey.groupKeyHex);
+    }
+
+    // 2. CONSTRUCT NOSTR EVENT TAGS (Protocol compliant, no custom eventId tag)
+    const tags: string[][] = [
+      ['d', groupId],
+      ['k', String(usedKeyVersion)],
+    ];
+
+    for (const parentId of parentEventIds) {
+      if (parentId) {
+        tags.push(['e', parentId]);
+      }
+    }
+
+    for (const recipient of recipientPubkeys) {
+      if (recipient && !tags.some((t) => t[0] === 'p' && t[1] === recipient)) {
+        tags.push(['p', recipient]);
+      }
+    }
+
+    // 3. SIGN NOSTR EVENT
+    const signedNostrEvent = await identityService.signEvent({
+      kind: eventKind,
+      created_at: Math.floor(Date.now() / 1000),
+      tags,
+      content: payloadToSend,
+    });
+
+    // Mark event ID as processed locally to ensure O(1) synchronous self-echo deduplication
+    this.processedEventIds.add(signedNostrEvent.id);
+
+    // 4. CANONICAL PIPELINE VALIDATION (Executed exactly once for local and remote events)
+    const validated = await EventValidationPipeline.validateAndDecryptEvent(
+      signedNostrEvent,
+      async (gId: string) => db.group_keys.where('groupId').equals(gId).toArray()
+    );
+
+    if (!validated.isValid) {
+      throw new Error(`Local event validation failed: ${validated.error}`);
+    }
+
+    // 5. ATOMIC DEXIE TRANSACTION ('rw', [events, sync_queue, groups, members, expenses, settlements, group_keys, identities])
+    await db.transaction(
+      'rw',
+      [
+        db.events,
+        db.sync_queue,
+        db.groups,
+        db.members,
+        db.expenses,
+        db.settlements,
+        db.group_keys,
+        db.identities,
+      ],
+      async () => {
+        // A. Persist signed Nostr event to db.events
+        await db.events.put({
+          id: signedNostrEvent.id,
+          kind: signedNostrEvent.kind,
+          pubkey: signedNostrEvent.pubkey,
+          createdAt: signedNostrEvent.created_at,
+          groupId,
+          parentEventIdsJson: JSON.stringify(validated.parentEventIds),
+          rawEvent: JSON.stringify(signedNostrEvent),
+          keyVersion: usedKeyVersion,
+        });
+
+        // B. Reduce onto Domain Projections (calls persistAndReduceValidatedEvent)
+        await this.persistAndReduceValidatedEvent(validated);
+
+        // C. Queue for Relay Transmission
+        await db.sync_queue.add({
+          eventId: signedNostrEvent.id,
+          groupId,
+          eventKind,
+          keyVersion: usedKeyVersion,
+          payloadJson: payloadToSend,
+          signedNostrEventJson: JSON.stringify(signedNostrEvent),
+          recipientsJson: JSON.stringify(recipientPubkeys),
+          status: 'QUEUED',
+          attempts: 0,
+          lastAttemptAt: Date.now(),
+        });
+      }
+    );
+
+    // 6. UI NOTIFICATION & ASYNC RELAY FLUSH
+    this.notifyListeners();
+    void this.processSyncQueue(recipientPubkeys);
+
+    return validated;
+  }
+
+  /**
+   * Category B: Operational Signaling Local Event Publication API (ADR-005).
+   * Signs and queues operational signals (JOIN_REQUEST Kind 1504, SYNC_REQUEST Kind 1505)
+   * for relay broadcast WITHOUT invoking EventReducer.
+   */
+  async publishSignalEvent<T = any>(options: SubmitLocalEventOptions<T>): Promise<string> {
+    const {
+      groupId,
+      eventKind,
+      unencryptedPayload,
+      parentEventIds = [],
+      recipientPubkeys = [],
+    } = options;
+
+    const currentIdentity = await identityService.getCurrentIdentity();
+    if (!currentIdentity) {
+      throw new Error('User identity required to publish signal event');
+    }
+
+    const payloadToSend =
+      typeof unencryptedPayload === 'string'
+        ? unencryptedPayload
+        : JSON.stringify(unencryptedPayload);
+
+    const tags: string[][] = [['d', groupId]];
+
+    const version = options.keyVersion ?? (unencryptedPayload as any)?.keyVersion;
+    if (version) {
+      tags.push(['k', String(version)]);
+    }
+
+    for (const parentId of parentEventIds) {
+      if (parentId) {
+        tags.push(['e', parentId]);
+      }
+    }
+
+    for (const recipient of recipientPubkeys) {
+      if (recipient && !tags.some((t) => t[0] === 'p' && t[1] === recipient)) {
+        tags.push(['p', recipient]);
+      }
+    }
+
+    const signedNostrEvent = await identityService.signEvent({
+      kind: eventKind,
+      created_at: Math.floor(Date.now() / 1000),
+      tags,
+      content: payloadToSend,
+    });
+
+    // Mark event ID as processed locally to ensure O(1) synchronous self-echo deduplication
+    this.processedEventIds.add(signedNostrEvent.id);
+
+    await db.sync_queue.add({
+      eventId: signedNostrEvent.id,
+      groupId,
+      eventKind,
+      keyVersion: version,
+      payloadJson: payloadToSend,
+      signedNostrEventJson: JSON.stringify(signedNostrEvent),
+      recipientsJson: JSON.stringify(recipientPubkeys),
+      status: 'QUEUED',
+      attempts: 0,
+      lastAttemptAt: Date.now(),
+    });
+
+    void this.processSyncQueue(recipientPubkeys);
+
+    return signedNostrEvent.id;
   }
 
   /**
@@ -382,19 +595,23 @@ export class SyncCoordinator {
    * Fully instrumented with post-verification diagnostics and error boundaries.
    */
   private async ingestEvent(event: NostrEvent): Promise<void> {
-    console.log(`SYNC enter event processing ${event.id} ${event.kind}`);
+    console.log(
+      `[PIPELINE-1504-1500] STEP 6: SyncCoordinator.ingestEvent received kind=${event.kind} id=${event.id} from pubkey=${event.pubkey}`
+    );
 
-    // 1. Event-Level Deduplication before crypto processing
+    // 1. Two-Tier Event Deduplication Architecture (ADR-005 Commit 1B)
+    // Tier 1: Synchronous O(1) in-memory hot cache for active session & self-authored events
     if (this.processedEventIds.has(event.id)) {
-      console.log(`SYNC early return: duplicate ignored ${event.id}`);
+      console.log(`SYNC early return: duplicate ignored (Tier 1 hot cache) ${event.id}`);
       return;
     }
     this.processedEventIds.add(event.id);
 
     try {
+      // Tier 2: Persistent IndexedDB cold storage lookup for multi-tab / post-restart sessions
       const existing = await db.events.get(event.id);
       if (existing) {
-        console.log(`SYNC early return: event already in DB ${event.id}`);
+        console.log(`SYNC early return: duplicate ignored (Tier 2 DB store) ${event.id}`);
         return;
       }
 
@@ -474,7 +691,9 @@ export class SyncCoordinator {
   private async persistAndReduceValidatedEvent(validated: ValidatedEvent): Promise<void> {
     const { event, groupId, payload, parentEventIds } = validated;
 
-    console.log(`SYNC beginning persistence ${event.id}`);
+    console.log(
+      `[PIPELINE-1504-1500] STEP 10: SyncCoordinator.persistAndReduceValidatedEvent reducing kind=${event.kind} id=${event.id} type=${payload?.type}`
+    );
 
     await db.events.put({
       id: event.id,
@@ -516,20 +735,25 @@ export class SyncCoordinator {
       }
     } else if (event.kind === 1501) {
       const type = payload?.type;
-      const expenseId = payload?.id;
-      if (type === 'EXPENSE_UPDATED' && expenseId) {
-        const currentExpense = await this.expenseRepo.getExpenseById(expenseId);
-        if (currentExpense) {
-          const updated = EventReducer.reduceExpenseUpdate(currentExpense, payload);
-          await this.expenseRepo.saveExpense(updated);
+      const expenseId = payload?.id ?? payload?.expenseId;
+
+      if (type === 'EXPENSE_UPDATED') {
+        if (expenseId) {
+          const currentExpense = await this.expenseRepo.getExpenseById(expenseId);
+          if (currentExpense) {
+            const updated = EventReducer.reduceExpenseUpdate(currentExpense, payload);
+            await this.expenseRepo.saveExpense(updated);
+          }
         }
-      } else if (type === 'EXPENSE_DELETED' && expenseId) {
-        const currentExpense = await this.expenseRepo.getExpenseById(expenseId);
-        if (currentExpense) {
-          const updated = EventReducer.reduceExpenseDelete(currentExpense, payload);
-          await this.expenseRepo.saveExpense(updated);
+      } else if (type === 'EXPENSE_DELETED') {
+        if (expenseId) {
+          const currentExpense = await this.expenseRepo.getExpenseById(expenseId);
+          if (currentExpense) {
+            const updated = EventReducer.reduceExpenseDelete(currentExpense, payload);
+            await this.expenseRepo.saveExpense(updated);
+          }
         }
-      } else {
+      } else if (type === 'EXPENSE_CREATED' || !type) {
         const expense = EventReducer.reduceExpense(payload);
         await this.expenseRepo.saveExpense(expense);
       }
@@ -591,6 +815,7 @@ export class SyncCoordinator {
    */
   async handleJoinRequest(joiningPubkey: string, payload: any): Promise<void> {
     const { groupId, joiningMember, invitationKeyVersion } = payload;
+
     const fulfillUseCase = new FulfillJoinRequestUseCase(this.groupRepo);
     await fulfillUseCase.execute({
       groupId,
@@ -631,7 +856,50 @@ export class SyncCoordinator {
     const group = await this.groupRepo.getGroupById(groupId);
     if (!group) return;
 
-    const isMember = group.members.some((m) => m.pubkey.value === requesterPubkey);
+    let isMember = group.members.some((m) => m.pubkey.value === requesterPubkey);
+
+    // If requester is not in group.members yet, check for a valid pending JOIN_REQUEST (Kind 1504)
+    if (!isMember && sinceKeyVersion !== undefined) {
+      const validKey = await db.group_keys
+        .where('[groupId+keyVersion]')
+        .equals([groupId, sinceKeyVersion])
+        .first();
+
+      if (validKey) {
+        const pendingJoinEvent = await db.events
+          .where('groupId')
+          .equals(groupId)
+          .filter((e) => e.kind === 1504 && e.pubkey === requesterPubkey)
+          .first();
+
+        if (pendingJoinEvent) {
+          try {
+            const rawEvent = JSON.parse(pendingJoinEvent.rawEvent);
+            const payloadObj =
+              typeof rawEvent.content === 'string' && rawEvent.content.startsWith('{')
+                ? JSON.parse(rawEvent.content)
+                : rawEvent.content;
+
+            const fulfillUseCase = new FulfillJoinRequestUseCase(this.groupRepo);
+            const added = await fulfillUseCase.execute({
+              groupId,
+              joiningPubkey: requesterPubkey,
+              joiningMember: payloadObj.joiningMember,
+              invitationKeyVersion: sinceKeyVersion,
+            });
+
+            if (added) {
+              const updatedGroup = await this.groupRepo.getGroupById(groupId);
+              isMember =
+                updatedGroup?.members.some((m) => m.pubkey.value === requesterPubkey) ?? false;
+            }
+          } catch {
+            // Join fulfillment failed
+          }
+        }
+      }
+    }
+
     if (!isMember) {
       console.log(
         `SYNC recovery request rejected: ${requesterPubkey} is not a member of group ${groupId}`

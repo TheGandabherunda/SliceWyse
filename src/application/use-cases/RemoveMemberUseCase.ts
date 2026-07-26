@@ -41,22 +41,10 @@ export class RemoveMemberUseCase {
 
     const remainingPubkeyValues = remainingMembers.map((m) => m.pubkey.value);
 
-    // 2. Update local Group entity state
-    const updatedGroup = new Group({
-      id: group.id,
-      name: group.name,
-      currency: group.currency,
-      members: remainingMembers,
-      createdAt: group.createdAt,
-      updatedAt: Date.now(),
-    });
-
-    await this.groupRepo.saveGroup(updatedGroup);
-
-    // 3. Single protocol operation: Rotate key epoch (KN -> KN+1) and distribute ONLY to remaining members
+    // 2. Single protocol operation: Rotate key epoch (KN -> KN+1) and distribute ONLY to remaining members
     const newKeyRecord = await syncCoordinator.rotateGroupKey(groupId, remainingPubkeyValues);
 
-    // 4. Emit MEMBERSHIP_REMOVED update event
+    // 3. Construct MEMBERSHIP_REMOVED protocol event payload
     const payload = {
       type: 'MEMBERSHIP_REMOVED',
       groupId,
@@ -65,8 +53,23 @@ export class RemoveMemberUseCase {
       parentEventIds: [],
     };
 
-    await syncCoordinator.enqueueEvent(groupId, 1500, payload, remainingPubkeyValues);
+    // 4. Submit Local Event via Unified Pipeline (ADR-005)
+    // Validates -> Signs -> db.events -> EventReducer.reduceMembershipRemove() -> db.groups/db.members -> db.sync_queue
+    await syncCoordinator.submitLocalEvent({
+      groupId,
+      eventKind: 1500,
+      unencryptedPayload: payload,
+      parentEventIds: [],
+      recipientPubkeys: remainingPubkeyValues,
+      keyVersion: newKeyRecord.keyVersion,
+    });
 
-    return updatedGroup;
+    // 5. Return canonical Group projection populated by EventReducer
+    const updated = await this.groupRepo.getGroupById(groupId);
+    if (!updated) {
+      throw new Error(`Failed to retrieve group projection after member removal for ${groupId}`);
+    }
+
+    return updated;
   }
 }

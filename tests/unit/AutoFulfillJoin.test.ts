@@ -131,11 +131,11 @@ describe('Milestone 8: Automatic Member Auto-Fulfillment & Join Requests (Kind 1
       requestedAt: 1020,
     };
 
-    const spyEnqueue = vi.spyOn(syncCoordinator, 'enqueueEvent');
+    const spySubmit = vi.spyOn(syncCoordinator, 'submitLocalEvent');
 
     // First JOIN_REQUEST replay
     await syncCoordinator.handleJoinRequest(bobPubkey, joinInput);
-    const initialCallCount = spyEnqueue.mock.calls.length;
+    const initialCallCount = spySubmit.mock.calls.length;
 
     const groupAfterFirst = await groupRepo.getGroupById(groupId);
     expect(groupAfterFirst?.members).toHaveLength(2); // Alice + Bob
@@ -146,8 +146,8 @@ describe('Milestone 8: Automatic Member Auto-Fulfillment & Join Requests (Kind 1
     const groupAfterSecond = await groupRepo.getGroupById(groupId);
     expect(groupAfterSecond?.members).toHaveLength(2); // Remains exactly 2, NO DUPLICATE MEMBERS
 
-    // Verify NO DUPLICATE MEMBERSHIP_ADDED events were enqueued
-    const secondCallCount = spyEnqueue.mock.calls.length;
+    // Verify NO DUPLICATE MEMBERSHIP_ADDED events were submitted
+    const secondCallCount = spySubmit.mock.calls.length;
     expect(secondCallCount).toBe(initialCallCount);
   });
 });

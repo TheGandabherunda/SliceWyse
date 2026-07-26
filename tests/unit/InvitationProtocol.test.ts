@@ -97,15 +97,20 @@ describe('Milestone 7: Ephemeral Bearer Invitation Envelopes (Kind 30078)', () =
       createdAt: Date.now(),
     });
 
-    const acceptUseCase = new AcceptInviteLinkUseCase(groupRepo);
-    const joinedGroup = await acceptUseCase.execute({
+    const acceptUseCase = new AcceptInviteLinkUseCase();
+    const result = await acceptUseCase.execute({
       groupId,
       invKeyHex,
       encryptedEventContent: encryptedContent,
     });
 
-    expect(joinedGroup.id).toBe(groupId);
-    expect(joinedGroup.name).toBe('Skiing Trip');
+    expect(result.groupId).toBe(groupId);
+    expect(result.inviterPubkey).toBe(alicePubkey);
+    expect(result.keyVersion).toBe(1);
+
+    // Verify ZERO synthetic group projections were created
+    const syntheticGroup = await groupRepo.getGroupById(groupId);
+    expect(syntheticGroup).toBeNull();
 
     // Verify group key stored under declared keyVersion 1
     const storedKey = await syncCoordinator.getGroupKey(groupId, 1);

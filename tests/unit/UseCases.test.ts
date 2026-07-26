@@ -13,6 +13,7 @@ import { DexieGroupRepository } from '../../src/infrastructure/repositories/Dexi
 import { DexieExpenseRepository } from '../../src/infrastructure/repositories/DexieExpenseRepository';
 import { DexieSettlementRepository } from '../../src/infrastructure/repositories/DexieSettlementRepository';
 import { aesGcmCryptoService } from '../../src/infrastructure/crypto/AesGcmCryptoService';
+import { EventValidationPipeline } from '../../src/domain/services/EventValidationPipeline';
 
 describe('Application Use Cases Integration Tests', () => {
   const createGroup = new CreateGroupUseCase();
@@ -38,6 +39,44 @@ describe('Application Use Cases Integration Tests', () => {
     await db.settlements.clear();
 
     await identityService.generateIdentity('Alice');
+  });
+
+  it('CreateGroupUseCase submits local event via single pipeline and allows deterministic replay from db.events', async () => {
+    const group = await createGroup.execute({ name: 'Pipeline Group', currency: 'EUR' });
+    expect(group).toBeDefined();
+    expect(group.name).toBe('Pipeline Group');
+
+    // 1. Verify GROUP_CREATED event exists in db.events BEFORE projection check
+    const storedEvents = await db.events.where('groupId').equals(group.id).toArray();
+    expect(storedEvents).toHaveLength(1);
+    expect(storedEvents[0].kind).toBe(1500);
+
+    // 2. Verify group and member projections exist in db.groups and db.members
+    const storedGroup = await db.groups.get(group.id);
+    expect(storedGroup).toBeDefined();
+    expect(storedGroup?.name).toBe('Pipeline Group');
+
+    const storedMembers = await db.members.where({ groupId: group.id }).toArray();
+    expect(storedMembers.length).toBeGreaterThanOrEqual(1);
+
+    // 3. Clear projections and verify deterministic replay from db.events
+    await db.groups.clear();
+    await db.members.clear();
+
+    expect(await db.groups.get(group.id)).toBeUndefined();
+
+    // Replay event from db.events via canonical EventValidationPipeline
+    const rawNostrEvent = JSON.parse(storedEvents[0].rawEvent);
+    const validated = await EventValidationPipeline.validateAndDecryptEvent(
+      rawNostrEvent,
+      async (gId: string) => db.group_keys.where('groupId').equals(gId).toArray()
+    );
+
+    await (syncCoordinator as any).persistAndReduceValidatedEvent(validated);
+
+    const replayedGroup = await db.groups.get(group.id);
+    expect(replayedGroup).toBeDefined();
+    expect(replayedGroup?.name).toBe('Pipeline Group');
   });
 
   it('should create group, invite & join member, add expense, and simplify debt', async () => {
@@ -76,10 +115,19 @@ describe('Application Use Cases Integration Tests', () => {
       createdAt: Date.now(),
     });
 
-    await acceptInviteLink.execute({
+    const acceptResult = await acceptInviteLink.execute({
       groupId: group.id,
       invKeyHex: inviteResult.invKeyHex,
       encryptedEventContent: encrypted,
+    });
+    expect(acceptResult.groupId).toBe(group.id);
+
+    // Alice auto-fulfills Bob's JOIN_REQUEST, reducing MEMBERSHIP_ADDED to db.groups
+    await syncCoordinator.handleJoinRequest(bobPubkey, {
+      type: 'JOIN_REQUEST',
+      groupId: group.id,
+      joiningMember: { pubkey: bobPubkey, displayName: 'Bob', joinedAt: Date.now() },
+      invitationKeyVersion: 1,
     });
 
     // 4. Alice pays $100 for Alice & Bob

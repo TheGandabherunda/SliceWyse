@@ -1,3 +1,4 @@
+import Dexie from 'dexie';
 import { db, type GroupRecord, type MemberRecord } from '../db/SliceWyseDatabase';
 import { Group } from '../../domain/entities/Group';
 import { Member } from '../../domain/entities/Member';
@@ -14,7 +15,7 @@ export class DexieGroupRepository {
       updatedAt: group.updatedAt,
     };
 
-    await db.transaction('rw', db.groups, db.members, async () => {
+    const performSave = async () => {
       await db.groups.put(groupRecord);
 
       // Delete member records for members no longer present in group
@@ -44,7 +45,13 @@ export class DexieGroupRepository {
           await db.members.add(memberRecord);
         }
       }
-    });
+    };
+
+    if (Dexie.currentTransaction) {
+      await performSave();
+    } else {
+      await db.transaction('rw', db.groups, db.members, performSave);
+    }
   }
 
   async getGroupById(groupId: string): Promise<Group | null> {

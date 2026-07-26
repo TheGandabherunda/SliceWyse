@@ -55,10 +55,9 @@ export class FulfillJoinRequestUseCase {
         updatedAt: Date.now(),
       });
 
-      await this.groupRepo.saveGroup(updatedGroup);
       memberWasAdded = true;
 
-      // Emit Kind 1500 membership update
+      // Construct MEMBERSHIP_ADDED protocol event payload
       const membershipPayload = {
         type: 'MEMBERSHIP_ADDED',
         groupId: group.id,
@@ -70,12 +69,15 @@ export class FulfillJoinRequestUseCase {
         parentEventIds: [],
       };
 
-      await syncCoordinator.enqueueEvent(
-        group.id,
-        1500,
-        membershipPayload,
-        updatedMembers.map((m) => m.pubkey.value)
-      );
+      // Submit Local Event via Unified Pipeline (ADR-005)
+      // Validates -> Signs -> db.events -> EventReducer.reduceMembershipAdd() -> db.groups/db.members -> db.sync_queue
+      await syncCoordinator.submitLocalEvent({
+        groupId: group.id,
+        eventKind: 1500,
+        unencryptedPayload: membershipPayload,
+        parentEventIds: [],
+        recipientPubkeys: updatedMembers.map((m) => m.pubkey.value),
+      });
     }
 
     // Re-deliver any newer key epochs (invitationKeyVersion + 1 ... latest)

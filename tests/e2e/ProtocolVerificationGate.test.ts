@@ -247,13 +247,17 @@ describe('Milestone 12: SliceWyse Protocol v1 Final Verification Gate & Invarian
       createdAt: Date.now(),
     });
 
-    const joinedGroup = await acceptInvite.execute({
+    const acceptResult = await acceptInvite.execute({
       groupId,
       invKeyHex: inviteResult.invKeyHex,
       encryptedEventContent: encrypted,
     });
 
-    expect(joinedGroup.id).toBe(groupId);
+    expect(acceptResult.groupId).toBe(groupId);
+
+    // Verify ZERO synthetic member projections were added to the group projection
+    const groupState = await groupRepo.getGroupById(groupId);
+    expect(groupState?.hasMember(bobPubkey)).toBe(false);
   });
 
   it('Invariant 7: Offline Recovery Protocol (Kind 1505) re-delivers missing envelopes without generating new state', async () => {

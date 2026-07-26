@@ -78,13 +78,13 @@
       isAccepting = true;
       errorMsg = '';
 
-      const joinedGroup = await acceptInviteLink.execute({
+      const result = await acceptInviteLink.execute({
         groupId,
         invKeyHex,
         encryptedEventContent: encryptedContent,
       });
 
-      onJoined(joinedGroup.id);
+      onJoined(result.groupId);
     } catch (err: unknown) {
       errorMsg = err instanceof Error ? err.message : 'Failed to accept invitation.';
     } finally {

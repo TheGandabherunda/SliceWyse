@@ -239,4 +239,57 @@ describe('Milestone 9: Member Removal & Lazy Key Rotation', () => {
       replica2Group.members.map((m) => m.pubkey.value)
     );
   });
+
+  it('RemoveMemberUseCase routes through submitLocalEvent and allows deterministic projection replay', async () => {
+    vi.spyOn(syncCoordinator, 'processSyncQueue').mockResolvedValue(undefined);
+
+    const groupId = 'grp_rem_pipeline_500';
+    const initialGroup = new Group({
+      id: groupId,
+      name: 'Single Pipeline Removal',
+      currency: 'USD',
+      members: [
+        new Member({ pubkey: new Pubkey(alicePubkey), displayName: 'Alice', joinedAt: 1000 }),
+        new Member({ pubkey: new Pubkey(bobPubkey), displayName: 'Bob', joinedAt: 1000 }),
+      ],
+      createdAt: 1000,
+      updatedAt: 1000,
+    });
+    await groupRepo.saveGroup(initialGroup);
+    await syncCoordinator.rotateGroupKey(groupId, [alicePubkey, bobPubkey]);
+
+    const removeUseCase = new RemoveMemberUseCase();
+    const updatedGroup = await removeUseCase.execute({
+      groupId,
+      memberPubkeyToRemove: bobPubkey,
+    });
+
+    expect(updatedGroup.hasMember(bobPubkey)).toBe(false);
+
+    // Verify MEMBERSHIP_REMOVED event exists in db.events
+    const events = await db.events.where('groupId').equals(groupId).toArray();
+    expect(events.length).toBeGreaterThanOrEqual(1);
+
+    // Clear group & member projections and replay from db.events
+    await db.groups.clear();
+    await db.members.clear();
+
+    expect(await groupRepo.getGroupById(groupId)).toBeNull();
+
+    // Replay initial group + removal event
+    await groupRepo.saveGroup(initialGroup);
+
+    for (const record of events) {
+      const rawNostrEvent = JSON.parse(record.rawEvent);
+      const validated = await EventValidationPipeline.validateAndDecryptEvent(
+        rawNostrEvent,
+        async (gId: string) => db.group_keys.where('groupId').equals(gId).toArray()
+      );
+      await (syncCoordinator as any).persistAndReduceValidatedEvent(validated);
+    }
+
+    const replayedGroup = await groupRepo.getGroupById(groupId);
+    expect(replayedGroup).toBeDefined();
+    expect(replayedGroup?.hasMember(bobPubkey)).toBe(false);
+  });
 });

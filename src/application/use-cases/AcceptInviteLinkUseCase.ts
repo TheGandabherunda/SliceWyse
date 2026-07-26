@@ -1,8 +1,4 @@
-import { Group } from '../../domain/entities/Group';
-import { Member } from '../../domain/entities/Member';
-import { Pubkey } from '../../domain/value-objects/Pubkey';
 import { identityService } from '../../infrastructure/identity/IdentityService';
-import { DexieGroupRepository } from '../../infrastructure/repositories/DexieGroupRepository';
 import { syncCoordinator } from '../services/SyncCoordinator';
 import { aesGcmCryptoService } from '../../infrastructure/crypto/AesGcmCryptoService';
 import { db } from '../../infrastructure/db/SliceWyseDatabase';
@@ -14,10 +10,16 @@ export interface AcceptInviteLinkInput {
   rawInvitationPayload?: any; // For direct offline acceptance or test fixtures
 }
 
-export class AcceptInviteLinkUseCase {
-  constructor(private groupRepo = new DexieGroupRepository()) {}
+export interface AcceptInviteLinkResult {
+  groupId: string;
+  inviterPubkey: string;
+  keyVersion: number;
+  joinRequestId: string;
+  syncRequestId: string;
+}
 
-  async execute(input: AcceptInviteLinkInput): Promise<Group> {
+export class AcceptInviteLinkUseCase {
+  async execute(input: AcceptInviteLinkInput): Promise<AcceptInviteLinkResult> {
     const currentIdentity = await identityService.getCurrentIdentity();
     if (!currentIdentity) {
       throw new Error('User identity required to accept invitation');
@@ -54,7 +56,7 @@ export class AcceptInviteLinkUseCase {
       throw new Error('Invitation link has expired');
     }
 
-    // 1. Store recovered group key under declared keyVersion
+    // 1. Store cryptographic group key under declared keyVersion ONLY (Zero projection writes!)
     const existingKey = await db.group_keys
       .where('[groupId+keyVersion]')
       .equals([payload.groupId, payload.keyVersion])
@@ -69,51 +71,54 @@ export class AcceptInviteLinkUseCase {
       });
     }
 
-    // 2. Hydrate local Group entity
-    const existingGroup = await this.groupRepo.getGroupById(payload.groupId);
-    let group: Group;
+    const recipients = Array.from(new Set([payload.inviterPubkey])).filter(Boolean);
 
-    const newMember = new Member({
-      pubkey: new Pubkey(currentIdentity.pubkey),
-      displayName: currentIdentity.displayName,
-      joinedAt: Date.now(),
+    // 2. Publish operational signal JOIN_REQUEST (Kind 1504) via publishSignalEvent()
+    const joinPayload = {
+      type: 'JOIN_REQUEST',
+      groupId: payload.groupId,
+      joiningMember: {
+        pubkey: currentIdentity.pubkey,
+        displayName: currentIdentity.displayName,
+        joinedAt: Date.now(),
+      },
+      invitationKeyVersion: payload.keyVersion,
+      requestedAt: Date.now(),
+    };
+
+    const joinRequestId = await syncCoordinator.publishSignalEvent({
+      groupId: payload.groupId,
+      eventKind: 1504,
+      unencryptedPayload: joinPayload,
+      parentEventIds: [],
+      recipientPubkeys: recipients,
+      keyVersion: payload.keyVersion,
     });
 
-    if (existingGroup) {
-      if (existingGroup.hasMember(currentIdentity.pubkey)) {
-        return existingGroup;
-      }
-      group = new Group({
-        id: existingGroup.id,
-        name: existingGroup.name,
-        currency: existingGroup.currency,
-        members: [...existingGroup.members, newMember],
-        createdAt: existingGroup.createdAt,
-        updatedAt: Date.now(),
-      });
-    } else {
-      group = new Group({
-        id: payload.groupId,
-        name: payload.groupName || 'Joined Group',
-        currency: payload.currency || 'USD',
-        members: [newMember],
-        createdAt: payload.createdAt ?? Date.now(),
-        updatedAt: Date.now(),
-      });
-    }
+    // 3. Publish operational signal SYNC_REQUEST (Kind 1505) via publishSignalEvent()
+    const syncPayload = {
+      type: 'SYNC_REQUEST',
+      groupId: payload.groupId,
+      sinceKeyVersion: payload.keyVersion,
+      knownEventIds: [],
+      requestedAt: Date.now(),
+    };
 
-    await this.groupRepo.saveGroup(group);
+    const syncRequestId = await syncCoordinator.publishSignalEvent({
+      groupId: payload.groupId,
+      eventKind: 1505,
+      unencryptedPayload: syncPayload,
+      parentEventIds: [],
+      recipientPubkeys: recipients,
+      keyVersion: payload.keyVersion,
+    });
 
-    const recipients = Array.from(
-      new Set([payload.inviterPubkey, ...group.members.map((m) => m.pubkey.value)])
-    ).filter(Boolean);
-
-    // 3. Emit Kind 1504 JOIN_REQUEST so online members automatically fulfill and emit MEMBERSHIP_ADDED (Kind 1500)
-    await syncCoordinator.sendJoinRequest(group.id, payload.keyVersion, recipients);
-
-    // 4. Request historical sync catch-up (Kind 1505) from group members for any newer epochs / missing events
-    await syncCoordinator.requestHistoricalSync(group.id, recipients, payload.keyVersion);
-
-    return group;
+    return {
+      groupId: payload.groupId,
+      inviterPubkey: payload.inviterPubkey,
+      keyVersion: payload.keyVersion,
+      joinRequestId,
+      syncRequestId,
+    };
   }
 }

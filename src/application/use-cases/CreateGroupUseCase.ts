@@ -54,44 +54,44 @@ export class CreateGroupUseCase {
     }
 
     const groupId = `grp_${crypto.randomUUID().slice(0, 8)}`;
-    const group = new Group({
-      id: groupId,
-      name: input.name.trim(),
-      currency: input.currency || 'USD',
-      members,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    });
+    const now = Date.now();
 
-    await this.groupRepo.saveGroup(group);
+    // 1. Initialize Group Key (epoch 1) before encryption & signing
+    const memberPubkeys = members.map((m) => m.pubkey.value);
+    await syncCoordinator.rotateGroupKey(groupId, memberPubkeys);
 
-    // 1. Rotate/Initialize Group Key via sole authority syncCoordinator.rotateGroupKey (epoch 1)
-    const memberPubkeys = group.members.map((m) => m.pubkey.value);
-    await syncCoordinator.rotateGroupKey(group.id, memberPubkeys);
-
-    // 3. Enqueue Immutable Group Creation Event (Kind 1500)
+    // 2. Construct GROUP_CREATED Event Payload
     const groupPayload = {
       type: 'GROUP_CREATED',
-      groupId: group.id,
-      name: group.name,
-      currency: group.currency,
-      members: group.members.map((m) => ({
+      groupId,
+      name: input.name.trim(),
+      currency: input.currency || 'USD',
+      members: members.map((m) => ({
         pubkey: m.pubkey.value,
         displayName: m.displayName,
         joinedAt: m.joinedAt,
       })),
       keyVersion: 1,
       parentEventIds: [],
-      createdAt: group.createdAt,
+      createdAt: now,
     };
 
-    await syncCoordinator.enqueueEvent(
-      group.id,
-      1500,
-      groupPayload,
-      group.members.map((m) => m.pubkey.value)
-    );
+    // 3. Submit Local Event via Unified Pipeline (ADR-005)
+    // Validates -> Signs -> db.events -> EventReducer.reduceGroup() -> db.groups/db.members -> db.sync_queue
+    await syncCoordinator.submitLocalEvent({
+      groupId,
+      eventKind: 1500,
+      unencryptedPayload: groupPayload,
+      parentEventIds: [],
+      recipientPubkeys: memberPubkeys,
+    });
 
-    return group;
+    // 4. Return canonical Group projection populated by EventReducer
+    const createdGroup = await this.groupRepo.getGroupById(groupId);
+    if (!createdGroup) {
+      throw new Error(`Failed to initialize group projection for ${groupId}`);
+    }
+
+    return createdGroup;
   }
 }

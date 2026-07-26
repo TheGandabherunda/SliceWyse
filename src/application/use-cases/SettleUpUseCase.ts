@@ -22,38 +22,41 @@ export class SettleUpUseCase {
       throw new Error('User identity required to record settlement');
     }
 
-    const settlement = new Settlement({
-      id: `set_${crypto.randomUUID().slice(0, 8)}`,
+    const settlementId = `set_${crypto.randomUUID().slice(0, 8)}`;
+    const now = Date.now();
+
+    // Construct Immutable Settlement Event (Kind 1502)
+    const settlementPayload = {
+      type: 'SETTLEMENT_CREATED',
+      id: settlementId,
+      settlementId,
       groupId: input.groupId,
       payer: input.payerPubkey,
       payee: input.payeePubkey,
-      amount: new Money(input.amountCents, input.currency),
-      date: Date.now(),
-      createdBy: currentIdentity.pubkey,
-    });
-
-    await this.settlementRepo.saveSettlement(settlement);
-
-    // Enqueue Immutable Settlement Event (Kind 1502)
-    const settlementPayload = {
-      type: 'SETTLEMENT_CREATED',
-      groupId: settlement.groupId,
-      settlementId: settlement.id,
-      payer: settlement.payer,
-      payee: settlement.payee,
-      amountCents: settlement.amount.amountCents,
-      currency: settlement.amount.currency,
-      date: settlement.date,
+      amountCents: input.amountCents,
+      currency: input.currency,
+      date: now,
       keyVersion: 1,
       parentEventIds: input.parentEventIds ?? [],
-      createdBy: settlement.createdBy,
+      createdBy: currentIdentity.pubkey,
     };
 
-    await syncCoordinator.enqueueEvent(settlement.groupId, 1502, settlementPayload, [
-      settlement.payer,
-      settlement.payee,
-    ]);
+    // Submit Local Event via Unified Pipeline (ADR-005)
+    // Validates -> Signs -> db.events -> EventReducer.reduceSettlement() -> db.settlements -> db.sync_queue
+    await syncCoordinator.submitLocalEvent({
+      groupId: input.groupId,
+      eventKind: 1502,
+      unencryptedPayload: settlementPayload,
+      parentEventIds: input.parentEventIds ?? [],
+      recipientPubkeys: [input.payerPubkey, input.payeePubkey],
+    });
 
-    return settlement;
+    // Return canonical Settlement projection populated by EventReducer
+    const createdSettlement = await this.settlementRepo.getSettlementById(settlementId);
+    if (!createdSettlement) {
+      throw new Error(`Failed to initialize settlement projection for ${settlementId}`);
+    }
+
+    return createdSettlement;
   }
 }

@@ -188,4 +188,108 @@ describe('Milestone 10: Expense & Settlement DAG Editing Engine', () => {
     const deletedResult = EventReducer.reduceExpenseDelete(initialExpense, deletePayload);
     expect(deletedResult.isDeleted).toBe(true);
   });
+
+  it('Financial use cases route through submitLocalEvent and allow full projection replay', async () => {
+    vi.spyOn(syncCoordinator, 'processSyncQueue').mockResolvedValue(undefined);
+    const { SettleUpUseCase } = await import('../../src/application/use-cases/SettleUpUseCase');
+
+    const addUseCase = new AddExpenseUseCase();
+    const updateUseCase = new UpdateExpenseUseCase();
+    const deleteUseCase = new DeleteExpenseUseCase();
+    const settleUseCase = new SettleUpUseCase();
+
+    // 1. Add Expense
+    const expense = await addUseCase.execute({
+      groupId,
+      title: 'Dinner',
+      amountCents: 4000,
+      currency: 'USD',
+      paidByPubkey: alicePubkey,
+      participantPubkeys: [alicePubkey, bobPubkey],
+      splitType: 'EQUAL',
+    });
+
+    expect(expense).toBeDefined();
+
+    // Verify db.events contains Kind 1501
+    const eventsBeforeUpdate = await db.events.where('groupId').equals(groupId).toArray();
+    expect(eventsBeforeUpdate.length).toBeGreaterThanOrEqual(1);
+
+    // 2. Update Expense
+    const updated = await updateUseCase.execute({
+      expenseId: expense.id,
+      groupId,
+      title: 'Dinner with Wine',
+      amountCents: 6000,
+      parentEventId: eventsBeforeUpdate[eventsBeforeUpdate.length - 1].id,
+    });
+
+    expect(updated.title).toBe('Dinner with Wine');
+
+    // 3. Settle Up
+    const settlement = await settleUseCase.execute({
+      groupId,
+      payerPubkey: bobPubkey,
+      payeePubkey: alicePubkey,
+      amountCents: 3000,
+      currency: 'USD',
+    });
+
+    expect(settlement).toBeDefined();
+
+    // 4. Verify db.events contains all financial events
+    const allEvents = await db.events.where('groupId').equals(groupId).toArray();
+    expect(allEvents.length).toBeGreaterThanOrEqual(3);
+
+    // 5. Clear projections and replay from db.events
+    await db.expenses.clear();
+    await db.settlements.clear();
+
+    expect(await db.expenses.get(expense.id)).toBeUndefined();
+    expect(await db.settlements.get(settlement.id)).toBeUndefined();
+
+    const { EventValidationPipeline } =
+      await import('../../src/domain/services/EventValidationPipeline');
+
+    const dagNodes = allEvents.map((r) => {
+      const raw = JSON.parse(r.rawEvent);
+      return {
+        eventId: r.id,
+        kind: r.kind,
+        pubkey: r.pubkey,
+        createdAt: r.createdAt,
+        groupId: r.groupId,
+        parentEventIds: JSON.parse(r.parentEventIdsJson || '[]'),
+        payload:
+          typeof raw.content === 'string' && raw.content.startsWith('{')
+            ? JSON.parse(raw.content)
+            : raw.content,
+      };
+    });
+
+    const { eventDagService } = await import('../../src/domain/services/EventDagService');
+    const sortedNodes = eventDagService.sortNodesTopologically(dagNodes);
+
+    for (const node of sortedNodes) {
+      const record = allEvents.find((e) => e.id === node.eventId)!;
+      const rawNostrEvent = JSON.parse(record.rawEvent);
+      const validated = await EventValidationPipeline.validateAndDecryptEvent(
+        rawNostrEvent,
+        async (gId: string) => db.group_keys.where('groupId').equals(gId).toArray()
+      );
+      await (syncCoordinator as any).persistAndReduceValidatedEvent(validated);
+    }
+
+    const { DexieSettlementRepository } =
+      await import('../../src/infrastructure/repositories/DexieSettlementRepository');
+    const settlementRepo = new DexieSettlementRepository();
+
+    const replayedExpense = await expenseRepo.getExpenseById(expense.id);
+    const replayedSettlement = await settlementRepo.getSettlementById(settlement.id);
+
+    expect(replayedExpense).toBeDefined();
+    expect(replayedExpense?.title).toBe('Dinner with Wine');
+    expect(replayedSettlement).toBeDefined();
+    expect(replayedSettlement?.amount.amountCents).toBe(3000);
+  });
 });
