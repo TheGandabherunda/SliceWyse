@@ -4,6 +4,7 @@
   import type { Group } from '../../domain/entities/Group';
   import type { IdentityRecord } from '../../infrastructure/db/SliceWyseDatabase';
   import EditProfileModal from '../components/EditProfileModal.svelte';
+  import ExportIdentityModal from '../components/ExportIdentityModal.svelte';
   import SyncStatusBadge from '../components/SyncStatusBadge.svelte';
   import CreateGroupModal from '../components/CreateGroupModal.svelte';
   import { Plus, Users, Sparkles, UserCheck, Edit2, RefreshCw } from 'lucide-svelte';
@@ -23,6 +24,7 @@
   let recoveryState = $state<RecoveryState>(syncCoordinator.getRecoveryState());
   let isCreateModalOpen = $state(false);
   let isEditProfileOpen = $state(false);
+  let isExportModalOpen = $state(false);
 
   const groupRepo = new DexieGroupRepository();
 
@@ -157,8 +159,14 @@
       currentName={currentIdentity.displayName}
       onClose={() => (isEditProfileOpen = false)}
       onUpdated={loadData}
+      onOpenExport={() => (isExportModalOpen = true)}
     />
   {/if}
+
+  <ExportIdentityModal
+    isOpen={isExportModalOpen}
+    onClose={() => (isExportModalOpen = false)}
+  />
 </div>
 
 <style>

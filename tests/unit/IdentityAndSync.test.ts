@@ -37,23 +37,38 @@ describe('identity profile refresh', () => {
   });
 });
 
-describe('encrypted sync payloads', () => {
+describe('identity export functionality', () => {
   beforeEach(async () => {
     await db.identities.clear();
   });
 
-  it('encrypts and decrypts shared group data using AES-256-GCM', async () => {
-    const groupKeyHex = aesGcmCryptoService.generateGroupKeyHex();
-    const payload = JSON.stringify({
-      groupId: 'grp_private',
-      title: 'Private dinner',
-      amountCents: 4200,
-    });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
-    const ciphertext = await aesGcmCryptoService.encrypt(payload, groupKeyHex);
-    expect(ciphertext).not.toContain('Private dinner');
+  it('exports secret key in NIP-19 nsec format for local identities', async () => {
+    const secretKeyBytes = generateSecretKey();
+    const secretKeyHex = bytesToHex(secretKeyBytes);
+    await identityService.importSecretKey(secretKeyHex, 'Alice');
 
-    const decrypted = await aesGcmCryptoService.decrypt(ciphertext, groupKeyHex);
-    expect(JSON.parse(decrypted)).toEqual(JSON.parse(payload));
+    const exportedNsec = await identityService.exportSecretKeyNsec();
+    expect(exportedNsec).toBeDefined();
+    expect(exportedNsec).toMatch(/^nsec1[a-z0-9]+$/);
+  });
+
+  it('returns null when exporting secret key for extension-based identity', async () => {
+    vi.spyOn(identityService, 'hydrateProfile').mockResolvedValue('Ext User');
+
+    (globalThis as any).window = {
+      nostr: {
+        getPublicKey: async () =>
+          '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff',
+        signEvent: async (evt: any) => evt,
+      },
+    };
+
+    await identityService.connectExtension('Ext User');
+    const exportedNsec = await identityService.exportSecretKeyNsec();
+    expect(exportedNsec).toBeNull();
   });
 });

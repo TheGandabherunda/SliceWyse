@@ -206,6 +206,19 @@ export class IdentityService {
   }
 
   /**
+   * Encodes current identity's secret key into NIP-19 nsec string format.
+   * Returns null if current identity is extension-based or has no local secret key.
+   */
+  async exportSecretKeyNsec(): Promise<string | null> {
+    const current = await this.getCurrentIdentity();
+    if (!current || !current.secretKey) {
+      return null;
+    }
+    const secretKeyBytes = hexToBytes(current.secretKey);
+    return nip19.nsecEncode(secretKeyBytes);
+  }
+
+  /**
    * Updates display name for current identity and syncs across all member records in local groups.
    */
   async updateDisplayName(newName: string): Promise<void> {

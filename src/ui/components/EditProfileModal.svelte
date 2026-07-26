@@ -1,15 +1,16 @@
 <script lang="ts">
   import { identityService } from '../../infrastructure/identity/IdentityService';
-  import { X, UserCheck } from 'lucide-svelte';
+  import { X, UserCheck, Key } from 'lucide-svelte';
 
   interface Props {
     isOpen: boolean;
     currentName: string;
     onClose: () => void;
     onUpdated: () => void;
+    onOpenExport?: () => void;
   }
 
-  let { isOpen, currentName, onClose, onUpdated }: Props = $props();
+  let { isOpen, currentName, onClose, onUpdated, onOpenExport }: Props = $props();
 
   let nameInput = $state('');
   let errorMsg = $state('');
@@ -59,7 +60,7 @@
       tabindex="-1"
     >
       <div class="modal-header">
-        <h2 id="edit-profile-title"><UserCheck size={22} /> Edit Your Profile Name</h2>
+        <h2 id="edit-profile-title"><UserCheck size={22} /> Account Profile</h2>
         <button class="icon-btn" onclick={onClose} aria-label="Close modal">
           <X size={20} />
         </button>
@@ -82,6 +83,21 @@
             disabled={isLoading}
           />
         </div>
+
+        {#if onOpenExport}
+          <div class="backup-section">
+            <button
+              type="button"
+              class="btn btn-secondary backup-btn"
+              onclick={() => {
+                onClose();
+                onOpenExport();
+              }}
+            >
+              <Key size={16} /> Export & Backup Identity
+            </button>
+          </div>
+        {/if}
 
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" onclick={onClose} disabled={isLoading}>
@@ -160,6 +176,20 @@
       font-size: 0.875rem;
       color: var(--text-secondary);
     }
+  }
+
+  .backup-section {
+    margin-top: 0.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .backup-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
   }
 
   .modal-actions {
