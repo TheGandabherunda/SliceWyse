@@ -27,10 +27,15 @@ export class AcceptInviteLinkUseCase {
 
     if (!payload && input.encryptedEventContent) {
       try {
-        const decryptedJson = await aesGcmCryptoService.decrypt(
-          input.encryptedEventContent,
-          input.invKeyHex
-        );
+        let textToDecrypt = input.encryptedEventContent;
+        if (textToDecrypt.trim().startsWith('{')) {
+          const parsedContainer = JSON.parse(textToDecrypt);
+          if (parsedContainer.encryptedPayload) {
+            textToDecrypt = parsedContainer.encryptedPayload;
+          }
+        }
+
+        const decryptedJson = await aesGcmCryptoService.decrypt(textToDecrypt, input.invKeyHex);
         payload = JSON.parse(decryptedJson);
       } catch {
         throw new Error('Failed to decrypt invitation envelope: Invalid invitation key');

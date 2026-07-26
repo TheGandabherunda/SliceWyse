@@ -45,9 +45,17 @@
       const inviteEvent = events[0];
       encryptedContent = inviteEvent.content;
 
+      let textToDecrypt = encryptedContent;
+      if (textToDecrypt.trim().startsWith('{')) {
+        const parsedContainer = JSON.parse(textToDecrypt);
+        if (parsedContainer.encryptedPayload) {
+          textToDecrypt = parsedContainer.encryptedPayload;
+        }
+      }
+
       // Decrypt payload to pre-display group name & details to user before accepting
       const aesService = (await import('../../infrastructure/crypto/AesGcmCryptoService')).aesGcmCryptoService;
-      const decryptedJson = await aesService.decrypt(encryptedContent, invKeyHex);
+      const decryptedJson = await aesService.decrypt(textToDecrypt, invKeyHex);
       const payload = JSON.parse(decryptedJson);
 
       groupName = payload.groupName || 'Unnamed Group';
