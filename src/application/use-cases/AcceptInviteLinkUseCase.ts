@@ -104,12 +104,15 @@ export class AcceptInviteLinkUseCase {
 
     await this.groupRepo.saveGroup(group);
 
-    // 3. Request historical sync catch-up (Kind 1505) from group members for any newer epochs / missing events
-    await syncCoordinator.requestHistoricalSync(
-      group.id,
-      group.members.map((m) => m.pubkey.value),
-      payload.keyVersion
-    );
+    const recipients = Array.from(
+      new Set([payload.inviterPubkey, ...group.members.map((m) => m.pubkey.value)])
+    ).filter(Boolean);
+
+    // 3. Emit Kind 1504 JOIN_REQUEST so online members automatically fulfill and emit MEMBERSHIP_ADDED (Kind 1500)
+    await syncCoordinator.sendJoinRequest(group.id, payload.keyVersion, recipients);
+
+    // 4. Request historical sync catch-up (Kind 1505) from group members for any newer epochs / missing events
+    await syncCoordinator.requestHistoricalSync(group.id, recipients, payload.keyVersion);
 
     return group;
   }
