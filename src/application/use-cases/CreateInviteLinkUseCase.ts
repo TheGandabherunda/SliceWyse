@@ -2,6 +2,7 @@ import { identityService } from '../../infrastructure/identity/IdentityService';
 import { DexieGroupRepository } from '../../infrastructure/repositories/DexieGroupRepository';
 import { syncCoordinator } from '../services/SyncCoordinator';
 import { aesGcmCryptoService } from '../../infrastructure/crypto/AesGcmCryptoService';
+import { buildInviteUrl } from '../../lib/utils/inviteUrlBuilder';
 
 export interface CreateInviteLinkInput {
   groupId: string;
@@ -63,8 +64,11 @@ export class CreateInviteLinkUseCase {
       encryptedPayload,
     });
 
-    const relayQuery = input.relayUrl ? `&relay=${encodeURIComponent(input.relayUrl)}` : '';
-    const inviteUrl = `#/join?groupId=${encodeURIComponent(group.id)}&invKey=${invKeyHex}${relayQuery}`;
+    const inviteUrl = buildInviteUrl({
+      groupId: group.id,
+      invKeyHex,
+      relayUrl: input.relayUrl,
+    });
 
     return {
       inviteUrl,
