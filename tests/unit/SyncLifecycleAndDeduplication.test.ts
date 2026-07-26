@@ -25,19 +25,24 @@ describe('Sync Lifecycle & Event Deduplication Guard Tests', () => {
     await db.sync_queue.clear();
   });
 
-  it('calling sync startup twice for same identity does not create two historical sync runs (idempotent)', async () => {
-    const querySpy = vi.spyOn(relayManager, 'queryEvents').mockResolvedValue([]);
+  it('synchronizes recoveryState and isHistorySyncing so badge updates immediately upon completion', async () => {
+    vi.spyOn(relayManager, 'queryEvents').mockResolvedValue([]);
     const pubkey = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
-    const unsub1 = await syncCoordinator.subscribeUserEvents(pubkey);
-    const initialCallCount = querySpy.mock.calls.length;
+    let listenerInvokedState: { recoveryState: string; isSyncing: boolean } | null = null;
 
-    // Second call for exact same pubkey
-    const unsub2 = await syncCoordinator.subscribeUserEvents(pubkey);
-    expect(querySpy.mock.calls.length).toBe(initialCallCount); // Zero extra history sync calls
+    const unsub = await syncCoordinator.subscribeUserEvents(pubkey, () => {
+      listenerInvokedState = {
+        recoveryState: syncCoordinator.getRecoveryState(),
+        isSyncing: syncCoordinator.isHistorySyncing(),
+      };
+    });
 
-    unsub1();
-    unsub2();
+    expect(syncCoordinator.getRecoveryState()).toBe('READY');
+    expect(syncCoordinator.isHistorySyncing()).toBe(false);
+    expect(listenerInvokedState).toEqual({ recoveryState: 'READY', isSyncing: false });
+
+    unsub();
   });
 
   it('opening/changing routes does not create another sync session if already active', async () => {

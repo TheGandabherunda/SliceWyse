@@ -29,7 +29,6 @@ export class SyncCoordinator {
 
   // Session & Deduplication State
   private activeSessionPubkey: string | null = null;
-  private isSyncingHistory = false;
   private recoveryState: RecoveryState = 'NOT_INITIALIZED';
   private processedEventIds = new Set<string>();
   private updateListeners = new Set<() => void>();
@@ -39,7 +38,11 @@ export class SyncCoordinator {
   }
 
   isHistorySyncing(): boolean {
-    return this.isSyncingHistory;
+    return (
+      this.recoveryState === 'RECOVERING_IDENTITY' ||
+      this.recoveryState === 'RECOVERING_GROUP_KEYS' ||
+      this.recoveryState === 'RECOVERING_EVENTS'
+    );
   }
 
   private setRecoveryState(state: RecoveryState): void {
@@ -243,8 +246,7 @@ export class SyncCoordinator {
    * Executes 4-Stage Historical Synchronization ONCE under in-flight guard.
    */
   private async runHistoricalSync(pubkeyHex: string): Promise<void> {
-    if (this.isSyncingHistory) return;
-    this.isSyncingHistory = true;
+    if (this.isHistorySyncing()) return;
 
     console.log(`SYNC history start ${pubkeyHex}`);
     const currentIdentity = await identityService.getCurrentIdentity();
@@ -321,12 +323,8 @@ export class SyncCoordinator {
       };
 
       console.log(`SYNC history complete ${pubkeyHex}`);
-      this.setRecoveryState('READY');
     } finally {
-      this.isSyncingHistory = false;
-      if (this.recoveryState !== 'READY') {
-        this.setRecoveryState('READY');
-      }
+      this.setRecoveryState('READY');
     }
   }
 
