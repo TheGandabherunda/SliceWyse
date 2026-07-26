@@ -72,7 +72,14 @@ describe('Sync Lifecycle & Event Deduplication Guard Tests', () => {
         kind: 1500,
         created_at: 1000,
         tags: [['d', 'grp_dup']],
-        content: JSON.stringify({ type: 'GROUP_CREATED', groupId: 'grp_dup', name: 'Dup Group' }),
+        content: JSON.stringify({
+          type: 'GROUP_CREATED',
+          groupId: 'grp_dup',
+          name: 'Dup Group',
+          currency: 'USD',
+          members: [],
+          createdAt: 1000,
+        }),
       },
       sk
     );

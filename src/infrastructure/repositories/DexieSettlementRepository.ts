@@ -36,4 +36,19 @@ export class DexieSettlementRepository {
         })
     );
   }
+
+  async getSettlementById(id: string): Promise<Settlement | null> {
+    const record = await db.settlements.get(id);
+    if (!record) return null;
+
+    return new Settlement({
+      id: record.id,
+      groupId: record.groupId,
+      payer: record.payer,
+      payee: record.payee,
+      amount: new Money(record.amountCents, record.currency),
+      date: record.date,
+      createdBy: record.createdBy,
+    });
+  }
 }

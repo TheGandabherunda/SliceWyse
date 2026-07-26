@@ -12,6 +12,15 @@ import { DexieGroupRepository } from '../../infrastructure/repositories/DexieGro
 import { DexieExpenseRepository } from '../../infrastructure/repositories/DexieExpenseRepository';
 import { DexieSettlementRepository } from '../../infrastructure/repositories/DexieSettlementRepository';
 import { EventReducer } from '../../domain/services/EventReducer';
+import {
+  EventValidationPipeline,
+  type ValidatedEvent,
+} from '../../domain/services/EventValidationPipeline';
+import { Group } from '../../domain/entities/Group';
+import { Member } from '../../domain/entities/Member';
+import { Pubkey } from '../../domain/value-objects/Pubkey';
+import { FulfillJoinRequestUseCase } from '../use-cases/FulfillJoinRequestUseCase';
+import { orphanBuffer } from '../../domain/services/OrphanBuffer';
 
 export type RecoveryState =
   | 'NOT_INITIALIZED'
@@ -35,6 +44,13 @@ export class SyncCoordinator {
 
   getRecoveryState(): RecoveryState {
     return this.recoveryState;
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.updateListeners.add(listener);
+    return () => {
+      this.updateListeners.delete(listener);
+    };
   }
 
   isHistorySyncing(): boolean {
@@ -62,10 +78,11 @@ export class SyncCoordinator {
     const eventId = `evt_${crypto.randomUUID()}`;
 
     // Retrieve active Group Key for AES-256-GCM encryption
-    const activeKey = await db.group_keys
-      .where('[groupId+keyVersion]')
-      .equals([groupId, unencryptedPayload.keyVersion ?? 1])
-      .first();
+    const activeKey = unencryptedPayload.keyVersion
+      ? await this.getGroupKey(groupId, unencryptedPayload.keyVersion)
+      : await this.getLatestGroupKey(groupId);
+
+    const usedKeyVersion = activeKey?.keyVersion ?? unencryptedPayload.keyVersion ?? 1;
 
     let payloadToSend = JSON.stringify(unencryptedPayload);
 
@@ -78,6 +95,7 @@ export class SyncCoordinator {
       eventId,
       groupId,
       eventKind,
+      keyVersion: usedKeyVersion,
       payloadJson: payloadToSend,
       recipientsJson: JSON.stringify(recipientPubkeys),
       status: 'QUEUED',
@@ -152,6 +170,10 @@ export class SyncCoordinator {
                 ['d', item.groupId],
                 ['e_id', item.eventId],
               ];
+
+              if (item.keyVersion) {
+                tags.push(['k', String(item.keyVersion)]);
+              }
 
               for (const recipient of itemRecipients) {
                 if (recipient && !tags.some((t) => t[0] === 'p' && t[1] === recipient)) {
@@ -390,6 +412,17 @@ export class SyncCoordinator {
         return;
       }
 
+      // Run 8-Step Event Validation Pipeline (Steps 1 through 7)
+      const validated = await EventValidationPipeline.validateAndDecryptEvent(
+        event,
+        async (groupId: string) => db.group_keys.where('groupId').equals(groupId).toArray()
+      );
+
+      if (!validated.isValid) {
+        console.log(`SYNC early return: ${validated.error} ${event.id}`);
+        return;
+      }
+
       // Handle Gift Wrap (Kind 1059)
       if (event.kind === 1059) {
         if (currentIdentity.secretKey) {
@@ -410,111 +443,256 @@ export class SyncCoordinator {
         return;
       }
 
-      // 4. Extracted groupId
-      const groupIdTag = event.tags.find((t) => t[0] === 'd');
-      const groupId = groupIdTag ? groupIdTag[1] : '';
-      console.log(`SYNC extracted groupId ${groupId || 'EMPTY'} for ${event.id}`);
-
-      if (!groupId) {
-        console.log(`SYNC early return: missing groupId ${event.id}`);
-        return;
-      }
-
-      // 6. Looking up group key in Dexie DB
-      console.log(`SYNC looking up group key ${groupId}`);
-      const groupKeys = await db.group_keys.where('groupId').equals(groupId).toArray();
-      let decryptedPayload: any = null;
-
-      if (groupKeys.length > 0) {
-        console.log(`SYNC group key found ${groupId} (count: ${groupKeys.length})`);
-        console.log(`SYNC beginning payload decryption ${event.id}`);
-
-        for (const k of groupKeys) {
-          try {
-            const decryptedJson = await aesGcmCryptoService.decrypt(event.content, k.groupKeyHex);
-            console.log(`SYNC decryption succeeded ${event.id}`);
-            console.log(`SYNC beginning JSON parse ${event.id}`);
-            decryptedPayload = JSON.parse(decryptedJson);
-            console.log(`SYNC JSON parse succeeded ${event.id}`);
-            console.log(
-              `SYNC extracted key version ${decryptedPayload.keyVersion ?? k.keyVersion} for ${event.id}`
-            );
+      // Check if all parentEventIds are present in IndexedDB storage
+      if (validated.parentEventIds.length > 0) {
+        let hasMissingParents = false;
+        for (const pId of validated.parentEventIds) {
+          const parentExists = await db.events.get(pId);
+          if (!parentExists) {
+            hasMissingParents = true;
             break;
-          } catch (decryptErr: any) {
-            console.log(
-              `SYNC decrypt failed for key version ${k.keyVersion} on ${event.id}: ${
-                decryptErr?.message || String(decryptErr)
-              }`
-            );
           }
         }
-      } else {
-        console.log(`SYNC group key not found ${groupId}`);
-        console.log(`SYNC attempting plaintext JSON parse fallback for ${event.id}`);
-        try {
-          decryptedPayload = JSON.parse(event.content);
-          console.log(`SYNC JSON parse succeeded for fallback ${event.id}`);
-        } catch (jsonErr: any) {
-          console.log(
-            `SYNC early return: JSON parse failed for fallback ${event.id}: ${
-              jsonErr?.message || String(jsonErr)
-            }`
-          );
+
+        if (hasMissingParents) {
+          console.log(`SYNC event buffered in orphan queue waiting for parents: ${event.id}`);
+          orphanBuffer.addOrphan(validated);
           return;
         }
       }
 
-      if (!decryptedPayload) {
-        console.log(`SYNC early return: decrypt failed / no valid payload ${event.id}`);
-        return;
-      }
-
-      // 12. Beginning domain model reconstruction
-      console.log(`SYNC beginning domain model reconstruction ${event.id}`);
-      const parentEventIds = decryptedPayload.parentEventIds ?? [];
-
-      // 13. Beginning persistence to IndexedDB
-      console.log(`SYNC beginning persistence ${event.id}`);
-
-      await db.events.put({
-        id: event.id,
-        kind: event.kind,
-        pubkey: event.pubkey,
-        createdAt: event.created_at,
-        groupId,
-        parentEventIdsJson: JSON.stringify(parentEventIds),
-        rawEvent: JSON.stringify(event),
-      });
-
-      // Reduce into Domain Entities
-      if (event.kind === 1500) {
-        const group = EventReducer.reduceGroup(decryptedPayload);
-        await this.groupRepo.saveGroup(group);
-      } else if (event.kind === 1501) {
-        const expense = EventReducer.reduceExpense(decryptedPayload);
-        await this.expenseRepo.saveExpense(expense);
-      } else if (event.kind === 1502) {
-        const settlement = EventReducer.reduceSettlement(decryptedPayload);
-        await this.settlementRepo.saveSettlement(settlement);
-      } else {
-        console.log(`SYNC early return: unsupported event kind ${event.kind} for ${event.id}`);
-        return;
-      }
-
-      // 14. Persistence succeeded
-      console.log(`SYNC persisted ${event.id}`);
-
-      // 15. UI/store listeners notified
-      console.log(`SYNC listeners notified ${event.id}`);
-      this.notifyListeners();
-
-      // 16. Event processing completed successfully
-      console.log(`SYNC event processing completed ${event.id}`);
+      await this.persistAndReduceValidatedEvent(validated);
+      await this.drainOrphanBuffer();
     } catch (error: any) {
       console.error(
         `SYNC event processing error ${event.id} ${event.kind}: ${error?.message || String(error)}`,
         error?.stack
       );
+    }
+  }
+
+  private async persistAndReduceValidatedEvent(validated: ValidatedEvent): Promise<void> {
+    const { event, groupId, payload, parentEventIds } = validated;
+
+    console.log(`SYNC beginning persistence ${event.id}`);
+
+    await db.events.put({
+      id: event.id,
+      kind: event.kind,
+      pubkey: event.pubkey,
+      createdAt: event.created_at,
+      groupId,
+      parentEventIdsJson: JSON.stringify(parentEventIds),
+      rawEvent: JSON.stringify(event),
+    });
+
+    // Reduce into Domain Entities via Pure Reducers
+    if (event.kind === 1500) {
+      const type = payload?.type;
+      if (type === 'GROUP_CREATED') {
+        const group = EventReducer.reduceGroup(payload);
+        await this.groupRepo.saveGroup(group);
+      } else if (type === 'GROUP_UPDATED') {
+        const currentGroup = await this.groupRepo.getGroupById(groupId);
+        if (currentGroup) {
+          const updated = EventReducer.reduceGroupUpdate(currentGroup, payload);
+          await this.groupRepo.saveGroup(updated);
+        }
+      } else if (type === 'MEMBERSHIP_ADDED') {
+        const currentGroup = await this.groupRepo.getGroupById(groupId);
+        if (currentGroup) {
+          const updated = EventReducer.reduceMembershipAdd(currentGroup, payload);
+          await this.groupRepo.saveGroup(updated);
+        }
+      } else if (type === 'MEMBERSHIP_REMOVED') {
+        const currentGroup = await this.groupRepo.getGroupById(groupId);
+        if (currentGroup) {
+          const updated = EventReducer.reduceMembershipRemove(currentGroup, payload);
+          await this.groupRepo.saveGroup(updated);
+        }
+      } else {
+        const group = EventReducer.reduceGroup(payload);
+        await this.groupRepo.saveGroup(group);
+      }
+    } else if (event.kind === 1501) {
+      const type = payload?.type;
+      const expenseId = payload?.id;
+      if (type === 'EXPENSE_UPDATED' && expenseId) {
+        const currentExpense = await this.expenseRepo.getExpenseById(expenseId);
+        if (currentExpense) {
+          const updated = EventReducer.reduceExpenseUpdate(currentExpense, payload);
+          await this.expenseRepo.saveExpense(updated);
+        }
+      } else if (type === 'EXPENSE_DELETED' && expenseId) {
+        const currentExpense = await this.expenseRepo.getExpenseById(expenseId);
+        if (currentExpense) {
+          const updated = EventReducer.reduceExpenseDelete(currentExpense, payload);
+          await this.expenseRepo.saveExpense(updated);
+        }
+      } else {
+        const expense = EventReducer.reduceExpense(payload);
+        await this.expenseRepo.saveExpense(expense);
+      }
+    } else if (event.kind === 1502) {
+      const type = payload?.type;
+      const settlementId = payload?.id;
+      if (type === 'SETTLEMENT_DELETED' && settlementId) {
+        const currentSettlement = await this.settlementRepo.getSettlementById(settlementId);
+        if (currentSettlement) {
+          const updated = EventReducer.reduceSettlementDelete(currentSettlement, payload);
+          await this.settlementRepo.saveSettlement(updated);
+        }
+      } else {
+        const settlement = EventReducer.reduceSettlement(payload);
+        await this.settlementRepo.saveSettlement(settlement);
+      }
+    } else if (event.kind === 1504) {
+      await this.handleJoinRequest(event.pubkey, payload);
+    } else if (event.kind === 1505) {
+      await this.handleSyncRequest(event.pubkey, payload);
+    } else {
+      console.log(`SYNC early return: unsupported event kind ${event.kind} for ${event.id}`);
+      return;
+    }
+
+    console.log(`SYNC persisted ${event.id}`);
+    this.notifyListeners();
+  }
+
+  /**
+   * Publishes a Kind 1504 JOIN_REQUEST event to online group members.
+   */
+  async sendJoinRequest(
+    groupId: string,
+    invitationKeyVersion: number,
+    recipientPubkeys: string[]
+  ): Promise<void> {
+    const currentIdentity = await identityService.getCurrentIdentity();
+    if (!currentIdentity) return;
+
+    const payload = {
+      type: 'JOIN_REQUEST',
+      groupId,
+      joiningMember: {
+        pubkey: currentIdentity.pubkey,
+        displayName: currentIdentity.displayName,
+        joinedAt: Date.now(),
+      },
+      invitationKeyVersion,
+      requestedAt: Date.now(),
+    };
+
+    await this.enqueueEvent(groupId, 1504, payload, recipientPubkeys);
+  }
+
+  /**
+   * Online member auto-fulfillment handler for Kind 1504 JOIN_REQUEST.
+   * Delegates fulfillment decision and execution to FulfillJoinRequestUseCase.
+   */
+  async handleJoinRequest(joiningPubkey: string, payload: any): Promise<void> {
+    const { groupId, joiningMember, invitationKeyVersion } = payload;
+    const fulfillUseCase = new FulfillJoinRequestUseCase(this.groupRepo);
+    await fulfillUseCase.execute({
+      groupId,
+      joiningPubkey,
+      joiningMember,
+      invitationKeyVersion,
+    });
+  }
+
+  /**
+   * Publishes a Kind 1505 SYNC_REQUEST to catch up on missed group events and key envelopes.
+   */
+  async requestHistoricalSync(
+    groupId: string,
+    recipientPubkeys: string[],
+    sinceKeyVersion?: number
+  ): Promise<void> {
+    const localEvents = await db.events.where('groupId').equals(groupId).toArray();
+    const knownEventIds = localEvents.map((e) => e.id);
+
+    const payload = {
+      type: 'SYNC_REQUEST',
+      groupId,
+      sinceKeyVersion,
+      knownEventIds,
+      requestedAt: Date.now(),
+    };
+
+    await this.enqueueEvent(groupId, 1505, payload, recipientPubkeys);
+  }
+
+  /**
+   * Responds to a Kind 1505 SYNC_REQUEST by validating the requester and re-sending missing key envelopes & events.
+   */
+  async handleSyncRequest(requesterPubkey: string, payload: any): Promise<void> {
+    const { groupId, sinceKeyVersion, knownEventIds = [] } = payload;
+
+    const group = await this.groupRepo.getGroupById(groupId);
+    if (!group) return;
+
+    const isMember = group.members.some((m) => m.pubkey.value === requesterPubkey);
+    if (!isMember) {
+      console.log(
+        `SYNC recovery request rejected: ${requesterPubkey} is not a member of group ${groupId}`
+      );
+      return;
+    }
+
+    const currentIdentity = await identityService.getCurrentIdentity();
+    if (!currentIdentity?.secretKey) return;
+
+    // Re-send existing group key envelopes (sinceKeyVersion + 1 ... latest)
+    const keys = await this.getAllGroupKeys(groupId);
+    const startVersion = (sinceKeyVersion ?? 0) + 1;
+    const neededKeys = keys.filter((k) => k.keyVersion >= startVersion);
+
+    for (const keyRecord of neededKeys) {
+      const envelope: GroupKeyEnvelope = {
+        protocolVersion: 1,
+        groupId,
+        keyVersion: keyRecord.keyVersion,
+        groupKey: keyRecord.groupKeyHex,
+        issuedAt: keyRecord.createdAt,
+      };
+
+      try {
+        const giftWrap = nip59GiftWrapService.createGiftWrap(
+          envelope,
+          currentIdentity.secretKey,
+          requesterPubkey
+        );
+        await this.enqueueSignedEvent(giftWrap, groupId, requesterPubkey);
+      } catch {
+        // Continue fulfilling request
+      }
+    }
+
+    // Re-send historical group events missing from requester's knownEventIds
+    const knownSet = new Set<string>(knownEventIds);
+    const storedEvents = await db.events.where('groupId').equals(groupId).toArray();
+
+    for (const record of storedEvents) {
+      if (!knownSet.has(record.id)) {
+        try {
+          const rawNostrEvent = JSON.parse(record.rawEvent) as NostrEvent;
+          await this.enqueueSignedEvent(rawNostrEvent, groupId, requesterPubkey);
+        } catch {
+          // Continue fulfilling request
+        }
+      }
+    }
+  }
+
+  private async drainOrphanBuffer(): Promise<void> {
+    const readyOrphans = await orphanBuffer.drainReadyOrphans(async (pId) => {
+      const exists = await db.events.get(pId);
+      return !!exists;
+    });
+
+    for (const ready of readyOrphans) {
+      console.log(`SYNC draining ready orphan event: ${ready.event.id}`);
+      await this.persistAndReduceValidatedEvent(ready);
     }
   }
 
@@ -540,6 +718,69 @@ export class SyncCoordinator {
         createdAt: envelope.issuedAt,
       });
     }
+  }
+
+  /**
+   * SOLE AUTHORITY for creating new group key epochs (Option B+ Architecture).
+   * Generates a fresh AES key for keyVersion (currentMax + 1), persists to IndexedDB,
+   * and dispatches NIP-59 Gift Wrap key envelopes to all active member pubkeys.
+   */
+  async rotateGroupKey(groupId: string, recipientPubkeys: string[]): Promise<GroupKeyRecord> {
+    const currentKeys = await this.getAllGroupKeys(groupId);
+    const nextKeyVersion =
+      currentKeys.length > 0 ? Math.max(...currentKeys.map((k) => k.keyVersion)) + 1 : 1;
+
+    const newGroupKeyHex = aesGcmCryptoService.generateGroupKeyHex();
+    const now = Date.now();
+
+    const newKeyRecord: GroupKeyRecord = {
+      groupId,
+      keyVersion: nextKeyVersion,
+      groupKeyHex: newGroupKeyHex,
+      createdAt: now,
+    };
+
+    await db.group_keys.add(newKeyRecord);
+
+    const currentIdentity = await identityService.getCurrentIdentity();
+    if (currentIdentity?.secretKey && recipientPubkeys.length > 0) {
+      const envelope: GroupKeyEnvelope = {
+        protocolVersion: 1,
+        groupId,
+        keyVersion: nextKeyVersion,
+        groupKey: newGroupKeyHex,
+        issuedAt: now,
+      };
+
+      for (const pubkey of recipientPubkeys) {
+        try {
+          const giftWrapEvent = nip59GiftWrapService.createGiftWrap(
+            envelope,
+            currentIdentity.secretKey,
+            pubkey
+          );
+          await this.enqueueSignedEvent(giftWrapEvent, groupId, pubkey);
+        } catch {
+          // Continue delivering key envelope to remaining active members
+        }
+      }
+    }
+
+    return newKeyRecord;
+  }
+
+  async getGroupKey(groupId: string, keyVersion: number): Promise<GroupKeyRecord | undefined> {
+    return db.group_keys.where('[groupId+keyVersion]').equals([groupId, keyVersion]).first();
+  }
+
+  async getLatestGroupKey(groupId: string): Promise<GroupKeyRecord | undefined> {
+    const keys = await this.getAllGroupKeys(groupId);
+    return keys.length > 0 ? keys[keys.length - 1] : undefined;
+  }
+
+  async getAllGroupKeys(groupId: string): Promise<GroupKeyRecord[]> {
+    const keys = await db.group_keys.where('groupId').equals(groupId).toArray();
+    return keys.sort((a, b) => a.keyVersion - b.keyVersion);
   }
 }
 

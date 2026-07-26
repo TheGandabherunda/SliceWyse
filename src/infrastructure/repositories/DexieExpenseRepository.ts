@@ -72,4 +72,43 @@ export class DexieExpenseRepository {
       });
     });
   }
+
+  async getExpenseById(id: string): Promise<Expense | null> {
+    const record = await db.expenses.get(id);
+    if (!record) return null;
+
+    const paidByRaw = JSON.parse(record.paidByJson) as Array<{
+      pubkey: string;
+      amountCents: number;
+    }>;
+    const splitsRaw = JSON.parse(record.splitsJson) as Array<{
+      pubkey: string;
+      amountCents: number;
+    }>;
+
+    const parentIds: string[] = record.parentEventIdsJson
+      ? JSON.parse(record.parentEventIdsJson)
+      : [];
+
+    return new Expense({
+      id: record.id,
+      groupId: record.groupId,
+      title: record.title,
+      amount: new Money(record.amountCents, record.currency),
+      paidBy: paidByRaw.map((p) => ({
+        pubkey: p.pubkey,
+        amount: new Money(p.amountCents, record.currency),
+      })),
+      splits: splitsRaw.map((s) => ({
+        pubkey: s.pubkey,
+        amount: new Money(s.amountCents, record.currency),
+      })),
+      splitType: record.splitType,
+      date: record.date,
+      version: record.revision,
+      previousVersionId: parentIds[0] ?? null,
+      isDeleted: record.isDeleted,
+      createdBy: record.createdBy,
+    });
+  }
 }

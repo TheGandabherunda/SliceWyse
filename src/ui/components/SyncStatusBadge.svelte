@@ -1,11 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Wifi, WifiOff, RefreshCw } from 'lucide-svelte';
-  import { syncCoordinator } from '../../application/services/SyncCoordinator';
-  import { identityService } from '../../infrastructure/identity/IdentityService';
+  import { syncCoordinator, type RecoveryState } from '../../application/services/SyncCoordinator';
 
   let isOnline = $state(navigator.onLine);
-  let isSyncing = $state(syncCoordinator.isHistorySyncing());
+  let recoveryState = $state<RecoveryState>(syncCoordinator.getRecoveryState());
 
   function updateOnlineStatus() {
     isOnline = navigator.onLine;
@@ -15,24 +14,14 @@
     window.addEventListener('online', updateOnlineStatus);
     window.addEventListener('offline', updateOnlineStatus);
 
-    let unsubscribeSync: (() => void) | undefined;
-
-    identityService.getCurrentIdentity().then((identity) => {
-      if (identity) {
-        syncCoordinator
-          .subscribeUserEvents(identity.pubkey, () => {
-            isSyncing = syncCoordinator.isHistorySyncing();
-          })
-          .then((unsub) => {
-            unsubscribeSync = unsub;
-          });
-      }
+    const unsubscribe = syncCoordinator.subscribe(() => {
+      recoveryState = syncCoordinator.getRecoveryState();
     });
 
     return () => {
       window.removeEventListener('online', updateOnlineStatus);
       window.removeEventListener('offline', updateOnlineStatus);
-      unsubscribeSync?.();
+      unsubscribe();
     };
   });
 </script>
@@ -41,9 +30,15 @@
   {#if !isOnline}
     <WifiOff size={14} />
     <span>Offline Mode</span>
-  {:else if isSyncing}
+  {:else if recoveryState === 'RECOVERING_IDENTITY'}
     <RefreshCw size={14} class="spinning" />
-    <span>Syncing...</span>
+    <span>Recovering Profile...</span>
+  {:else if recoveryState === 'RECOVERING_GROUP_KEYS'}
+    <RefreshCw size={14} class="spinning" />
+    <span>Syncing Group Keys...</span>
+  {:else if recoveryState === 'RECOVERING_EVENTS'}
+    <RefreshCw size={14} class="spinning" />
+    <span>Syncing Events...</span>
   {:else}
     <Wifi size={14} />
     <span>Relays Connected</span>

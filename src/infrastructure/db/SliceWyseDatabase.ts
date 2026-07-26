@@ -69,6 +69,7 @@ export interface SyncQueueRecord {
   eventId: string;
   groupId: string;
   eventKind: number;
+  keyVersion?: number;
   payloadJson: string;
   signedNostrEventJson?: string; // Serialized pre-signed Nostr event (e.g. Kind 1059 Gift Wrap)
   recipientsJson?: string;
@@ -86,6 +87,8 @@ export interface EventRecord {
   groupId: string;
   parentEventIdsJson: string;
   rawEvent: string;
+  depth?: number;
+  keyVersion?: number;
 }
 
 export class SliceWyseDatabase extends Dexie {
@@ -109,6 +112,9 @@ export class SliceWyseDatabase extends Dexie {
       group_keys: '++id, groupId, keyVersion, [groupId+keyVersion]',
       events: 'id, kind, pubkey, groupId',
       sync_queue: '++id, eventId, groupId, status, attempts',
+    });
+    this.version(3).stores({
+      events: 'id, kind, pubkey, groupId, depth, keyVersion',
     });
   }
 }

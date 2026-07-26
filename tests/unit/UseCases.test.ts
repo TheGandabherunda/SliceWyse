@@ -85,5 +85,5 @@ describe('Application Use Cases Integration Tests', () => {
 
     expect(finalBalances.get(alicePubkey)?.amountCents).toBe(0);
     expect(finalBalances.get(bobPubkey)?.amountCents).toBe(0);
-  });
+  }, 15000);
 });

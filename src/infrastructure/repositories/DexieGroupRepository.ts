@@ -17,6 +17,16 @@ export class DexieGroupRepository {
     await db.transaction('rw', db.groups, db.members, async () => {
       await db.groups.put(groupRecord);
 
+      // Delete member records for members no longer present in group
+      const activePubkeys = new Set(group.members.map((m) => m.pubkey.value));
+      const currentMemberRecords = await db.members.where({ groupId: group.id }).toArray();
+
+      for (const rec of currentMemberRecords) {
+        if (!activePubkeys.has(rec.pubkey)) {
+          await db.members.where('[groupId+pubkey]').equals([group.id, rec.pubkey]).delete();
+        }
+      }
+
       // Save members
       for (const member of group.members) {
         const existing = await db.members

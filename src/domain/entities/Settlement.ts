@@ -7,6 +7,7 @@ export interface SettlementProps {
   payee: string;
   amount: Money;
   date: number;
+  isDeleted?: boolean;
   createdBy: string;
 }
 
@@ -17,6 +18,7 @@ export class Settlement {
   readonly payee: string;
   readonly amount: Money;
   readonly date: number;
+  readonly isDeleted: boolean;
   readonly createdBy: string;
 
   constructor(props: SettlementProps) {
@@ -37,6 +39,7 @@ export class Settlement {
     this.payee = props.payee;
     this.amount = props.amount;
     this.date = props.date;
+    this.isDeleted = props.isDeleted ?? false;
     this.createdBy = props.createdBy;
   }
 }

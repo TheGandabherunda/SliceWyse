@@ -6,9 +6,75 @@ export interface DagNode {
   groupId: string;
   parentEventIds: string[];
   payload: any;
+  depth?: number;
 }
 
 export class EventDagService {
+  /**
+   * Computes derived Causal Depths for DAG nodes:
+   * Depth(e) = 0 if GroupCreated, 1 + max(Depth(parents)) otherwise.
+   */
+  computeDagDepths(nodes: DagNode[]): Map<string, number> {
+    const depthMap = new Map<string, number>();
+
+    // Assign Depth 0 to root GROUP_CREATED nodes
+    for (const node of nodes) {
+      if (node.kind === 1500 && node.payload?.type === 'GROUP_CREATED') {
+        depthMap.set(node.eventId, 0);
+      }
+    }
+
+    // Iteratively resolve depths: Depth(e) = 1 + max(Depth(parents))
+    let changed = true;
+    let iterations = 0;
+    const maxIterations = nodes.length + 5;
+
+    while (changed && iterations < maxIterations) {
+      changed = false;
+      iterations++;
+
+      for (const node of nodes) {
+        if (node.kind === 1500 && node.payload?.type === 'GROUP_CREATED') {
+          continue;
+        }
+
+        let maxParentDepth = -1;
+        let hasResolvedParent = false;
+
+        for (const pId of node.parentEventIds) {
+          if (depthMap.has(pId)) {
+            maxParentDepth = Math.max(maxParentDepth, depthMap.get(pId)!);
+            hasResolvedParent = true;
+          }
+        }
+
+        const calculatedDepth = hasResolvedParent ? maxParentDepth + 1 : 1;
+        if (depthMap.get(node.eventId) !== calculatedDepth) {
+          depthMap.set(node.eventId, calculatedDepth);
+          changed = true;
+        }
+      }
+    }
+
+    return depthMap;
+  }
+
+  /**
+   * Sorts DAG nodes using total order formula:
+   * SortKey(e) = <Depth(e), created_at(e), id(e)>
+   */
+  sortNodesTopologically(nodes: DagNode[]): DagNode[] {
+    const depthMap = this.computeDagDepths(nodes);
+    return [...nodes].sort((a, b) => {
+      const depthA = depthMap.get(a.eventId) ?? a.depth ?? 0;
+      const depthB = depthMap.get(b.eventId) ?? b.depth ?? 0;
+
+      if (depthA !== depthB) return depthA - depthB;
+      if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+      return a.eventId.localeCompare(b.eventId);
+    });
+  }
+
   /**
    * Builds DAG graph from event records and returns canonical state + detected branch conflicts.
    */
@@ -27,11 +93,8 @@ export class EventDagService {
       };
     }
 
-    // Sort nodes topologically / chronologically
-    const sorted = [...nodes].sort((a, b) => {
-      if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
-      return a.eventId.localeCompare(b.eventId);
-    });
+    // Sort nodes using total topological SortKey order
+    const sorted = this.sortNodesTopologically(nodes);
 
     const parentMap = new Map<string, Set<string>>();
     const childMap = new Map<string, Set<string>>();
@@ -64,31 +127,26 @@ export class EventDagService {
 
     for (const node of sorted) {
       if (node.kind === 1500) {
-        // GROUP_CREATED -> Add creator and initial members
-        if (node.payload.members) {
+        if (node.payload?.members) {
           for (const m of node.payload.members) {
             membershipSet.add(typeof m === 'string' ? m : m.pubkey);
           }
         }
         membershipSet.add(node.pubkey);
       } else if (node.kind === 1503) {
-        // MEMBER_EVENT -> Verify author is authorized in DAG state
-        if (node.payload.type === 'MEMBER_ADDED' && node.payload.targetPubkey) {
+        if (node.payload?.type === 'MEMBER_ADDED' && node.payload?.targetPubkey) {
           membershipSet.add(node.payload.targetPubkey);
-        } else if (node.payload.type === 'MEMBER_REMOVED' && node.payload.targetPubkey) {
+        } else if (node.payload?.type === 'MEMBER_REMOVED' && node.payload?.targetPubkey) {
           membershipSet.delete(node.payload.targetPubkey);
         }
       }
     }
 
-    // Deterministic tie-breaker for active latest event ID: highest createdAt, then lowest eventId lexically
+    // Deterministic tie-breaker for active latest event ID using sortNodesTopologically
     let latestEventId: string | null = null;
     if (leafNodes.length > 0) {
-      const sortedLeaves = [...leafNodes].sort((a, b) => {
-        if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt;
-        return a.eventId.localeCompare(b.eventId);
-      });
-      latestEventId = sortedLeaves[0].eventId;
+      const sortedLeaves = this.sortNodesTopologically(leafNodes);
+      latestEventId = sortedLeaves[sortedLeaves.length - 1].eventId;
     }
 
     return {
@@ -99,9 +157,6 @@ export class EventDagService {
     };
   }
 
-  /**
-   * Validates if a proposed key rotation (version V+1) is authorized by the current membership set.
-   */
   validateKeyRotation(
     issuerPubkey: string,
     keyVersion: number,
@@ -112,9 +167,6 @@ export class EventDagService {
     return authorizedMembershipSet.has(issuerPubkey);
   }
 
-  /**
-   * Validates if an incoming data event author was authorized at the time of event creation.
-   */
   isAuthorAuthorized(authorPubkey: string, authorizedMembershipSet: Set<string>): boolean {
     return authorizedMembershipSet.has(authorPubkey);
   }

@@ -65,39 +65,9 @@ export class CreateGroupUseCase {
 
     await this.groupRepo.saveGroup(group);
 
-    // 1. Generate 32-byte Group Key (keyVersion = 1)
-    const groupKeyHex = aesGcmCryptoService.generateGroupKeyHex();
-    await db.group_keys.add({
-      groupId: group.id,
-      keyVersion: 1,
-      groupKeyHex,
-      createdAt: Date.now(),
-    });
-
-    // 2. Distribute NIP-59 key envelopes to members and self-recovery context
-    if (currentIdentity.secretKey) {
-      const envelope: GroupKeyEnvelope = {
-        protocolVersion: 1,
-        groupId: group.id,
-        keyVersion: 1,
-        groupKey: groupKeyHex,
-        issuedAt: Date.now(),
-      };
-
-      for (const member of group.members) {
-        try {
-          const giftWrapEvent = nip59GiftWrapService.createGiftWrap(
-            envelope,
-            currentIdentity.secretKey,
-            member.pubkey.value
-          );
-          // Enqueue PRE-SIGNED Nostr event (Kind 1059) so it is published UNCHANGED without re-signing
-          await syncCoordinator.enqueueSignedEvent(giftWrapEvent, group.id, member.pubkey.value);
-        } catch {
-          // Ignore key envelope send errors for uncontactable members
-        }
-      }
-    }
+    // 1. Rotate/Initialize Group Key via sole authority syncCoordinator.rotateGroupKey (epoch 1)
+    const memberPubkeys = group.members.map((m) => m.pubkey.value);
+    await syncCoordinator.rotateGroupKey(group.id, memberPubkeys);
 
     // 3. Enqueue Immutable Group Creation Event (Kind 1500)
     const groupPayload = {
