@@ -12,7 +12,7 @@
 
   import SyncStatusBadge from '../components/SyncStatusBadge.svelte';
   import AddExpenseModal from '../components/AddExpenseModal.svelte';
-  import AddMemberModal from '../components/AddMemberModal.svelte';
+  import InviteMemberModal from '../components/InviteMemberModal.svelte';
   import SettleUpModal from '../components/SettleUpModal.svelte';
 
   import { ArrowLeft, Plus, UserPlus, Handshake, Receipt, ArrowRight } from 'lucide-svelte';
@@ -113,7 +113,7 @@
       <div class="header-actions">
         <SyncStatusBadge />
         <button class="btn btn-secondary btn-sm" onclick={() => (isAddMemberOpen = true)}>
-          <UserPlus size={16} /> Add Member
+          <UserPlus size={16} /> Invite Member
         </button>
       </div>
     </header>
@@ -242,11 +242,10 @@
       onAdded={loadData}
     />
 
-    <AddMemberModal
+    <InviteMemberModal
       isOpen={isAddMemberOpen}
       {groupId}
       onClose={() => (isAddMemberOpen = false)}
-      onAdded={loadData}
     />
 
     <SettleUpModal

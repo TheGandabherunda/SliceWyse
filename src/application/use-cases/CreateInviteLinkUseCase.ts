@@ -5,6 +5,7 @@ import { aesGcmCryptoService } from '../../infrastructure/crypto/AesGcmCryptoSer
 
 export interface CreateInviteLinkInput {
   groupId: string;
+  expiresAt?: number;
   relayUrl?: string;
 }
 
