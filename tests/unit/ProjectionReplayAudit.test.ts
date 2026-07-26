@@ -188,14 +188,10 @@ describe('ADR-005 Commit 7: Architecture Verification & Replay Audit', () => {
     expect(settlement).toBeDefined();
 
     // Step 8: Delete Expense 2
-    const allEventsBeforeDelete = await db.events.where('groupId').equals(groupId).toArray();
-    const expenseEvents = allEventsBeforeDelete.filter((e) => e.kind === 1501);
-    const taxiCreatedEvent = expenseEvents[1]; // Taxi is 2nd expense created
-
     const deletedExpense2 = await deleteExpense.execute({
       expenseId: expense2.id,
       groupId,
-      parentEventId: taxiCreatedEvent.id,
+      parentEventId: tipStep7,
     });
     expect(deletedExpense2.isDeleted).toBe(true);
 

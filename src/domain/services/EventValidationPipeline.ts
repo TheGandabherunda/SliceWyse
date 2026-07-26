@@ -102,6 +102,8 @@ export class EventValidationPipeline {
     let rawDecryptedPayload: any = null;
     let usedKeyVersion: number | undefined = explicitKeyVersion;
 
+    const isCanonicalEvent = event.kind >= 1500 && event.kind <= 1503;
+
     if (groupKeys.length > 0) {
       if (explicitKeyVersion !== undefined && !isNaN(explicitKeyVersion)) {
         // Direct canonical lookup by ["k", "<keyVersion>"] tag
@@ -113,7 +115,21 @@ export class EventValidationPipeline {
               matchingKey.groupKeyHex
             );
             rawDecryptedPayload = JSON.parse(decryptedJson);
+            if (isCanonicalEvent) {
+              console.log(
+                `[AES-GCM-DECRYPT] SUCCESS | Event: ${event.id} | Kind: ${event.kind} | Group: ${groupId} | KeyVersion: ${explicitKeyVersion}`
+              );
+            }
           } catch (err: any) {
+            if (isCanonicalEvent) {
+              const candidateKeysSummary = groupKeys.map((k) => ({
+                groupId: k.groupId,
+                keyVersion: k.keyVersion,
+              }));
+              console.warn(
+                `[AES-GCM-DECRYPT] FAILURE | Event: ${event.id} | Kind: ${event.kind} | Group: ${groupId} | ExtractedKeyVersion: ${explicitKeyVersion} | CandidateKeys: ${JSON.stringify(candidateKeysSummary)} | AttemptedKeyVersion: ${matchingKey.keyVersion} | Status: FAILED (${err?.message || String(err)})`
+              );
+            }
             return {
               isValid: false,
               event,
@@ -122,6 +138,14 @@ export class EventValidationPipeline {
               error: `Step 5 Failed: Canonical key version ${explicitKeyVersion} failed decryption`,
             };
           }
+        } else if (isCanonicalEvent) {
+          const candidateKeysSummary = groupKeys.map((k) => ({
+            groupId: k.groupId,
+            keyVersion: k.keyVersion,
+          }));
+          console.warn(
+            `[AES-GCM-DECRYPT] FAILURE | Event: ${event.id} | Kind: ${event.kind} | Group: ${groupId} | ExtractedKeyVersion: ${explicitKeyVersion} | CandidateKeys: ${JSON.stringify(candidateKeysSummary)} | Status: FAILED (No matching candidate key for version ${explicitKeyVersion})`
+          );
         }
       } else {
         // Fallback: Legacy event without ["k", "<keyVersion>"] tag — iterate historical keys highest to lowest
@@ -131,13 +155,31 @@ export class EventValidationPipeline {
             const decryptedJson = await aesGcmCryptoService.decrypt(event.content, k.groupKeyHex);
             rawDecryptedPayload = JSON.parse(decryptedJson);
             usedKeyVersion = rawDecryptedPayload.keyVersion ?? k.keyVersion;
+            if (isCanonicalEvent) {
+              console.log(
+                `[AES-GCM-DECRYPT] SUCCESS (Fallback) | Event: ${event.id} | Kind: ${event.kind} | Group: ${groupId} | AttemptedKeyVersion: ${k.keyVersion}`
+              );
+            }
             break;
-          } catch {
-            // Continue trying next historical key
+          } catch (err: any) {
+            if (isCanonicalEvent) {
+              const candidateKeysSummary = groupKeys.map((ck) => ({
+                groupId: ck.groupId,
+                keyVersion: ck.keyVersion,
+              }));
+              console.warn(
+                `[AES-GCM-DECRYPT] ATTEMPT FAILED (Fallback) | Event: ${event.id} | Kind: ${event.kind} | Group: ${groupId} | ExtractedKeyVersion: ${explicitKeyVersion ?? 'none'} | CandidateKeys: ${JSON.stringify(candidateKeysSummary)} | AttemptedKeyVersion: ${k.keyVersion} | Status: FAILED (${err?.message || String(err)})`
+              );
+            }
           }
         }
       }
     } else {
+      if (isCanonicalEvent) {
+        console.warn(
+          `[AES-GCM-DECRYPT] FAILURE | Event: ${event.id} | Kind: ${event.kind} | Group: ${groupId} | ExtractedKeyVersion: ${explicitKeyVersion ?? 'none'} | CandidateKeys: [] | Status: FAILED (No group keys found in db.group_keys)`
+        );
+      }
       // Plaintext JSON parse fallback for local dev / unencrypted events
       try {
         rawDecryptedPayload = JSON.parse(event.content);
@@ -147,6 +189,15 @@ export class EventValidationPipeline {
     }
 
     if (!rawDecryptedPayload) {
+      if (isCanonicalEvent) {
+        const candidateKeysSummary = groupKeys.map((k) => ({
+          groupId: k.groupId,
+          keyVersion: k.keyVersion,
+        }));
+        console.warn(
+          `[AES-GCM-DECRYPT] FINAL FAILURE | Event: ${event.id} | Kind: ${event.kind} | Group: ${groupId} | ExtractedKeyVersion: ${explicitKeyVersion ?? 'none'} | CandidateKeys: ${JSON.stringify(candidateKeysSummary)} | Status: ALL DECRYPTION ATTEMPTS FAILED`
+        );
+      }
       return {
         isValid: false,
         event,
